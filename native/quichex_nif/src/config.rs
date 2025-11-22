@@ -236,3 +236,63 @@ pub fn config_enable_dgram(
     cfg.enable_dgram(enabled, recv_queue_len, send_queue_len);
     Ok(())
 }
+
+/// Sets the maximum UDP payload size for receiving
+#[rustler::nif]
+pub fn config_set_max_recv_udp_payload_size(
+    config: ResourceArc<ConfigResource>,
+    size: usize,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.set_max_recv_udp_payload_size(size);
+    Ok(())
+}
+
+/// Sets the maximum UDP payload size for sending
+#[rustler::nif]
+pub fn config_set_max_send_udp_payload_size(
+    config: ResourceArc<ConfigResource>,
+    size: usize,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.set_max_send_udp_payload_size(size);
+    Ok(())
+}
+
+/// Disables or enables active connection migration
+#[rustler::nif]
+pub fn config_set_disable_active_migration(
+    config: ResourceArc<ConfigResource>,
+    disable: bool,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.set_disable_active_migration(disable);
+    Ok(())
+}
+
+/// Enables or disables GREASE
+#[rustler::nif]
+pub fn config_grease(
+    config: ResourceArc<ConfigResource>,
+    grease: bool,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.grease(grease);
+    Ok(())
+}

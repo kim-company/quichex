@@ -25,6 +25,10 @@ defmodule Quichex.Native do
   def config_load_verify_locations_from_file(_config, _path), do: error()
   def config_set_cc_algorithm(_config, _algo), do: error()
   def config_enable_dgram(_config, _enabled, _recv_queue_len, _send_queue_len), do: error()
+  def config_set_max_recv_udp_payload_size(_config, _size), do: error()
+  def config_set_max_send_udp_payload_size(_config, _size), do: error()
+  def config_set_disable_active_migration(_config, _disable), do: error()
+  def config_grease(_config, _grease), do: error()
 
   # Connection NIFs
   def connection_new_client(_scid, _server_name, _local_addr, _peer_addr, _config), do: error()

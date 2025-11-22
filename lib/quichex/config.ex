@@ -142,4 +142,84 @@ defmodule Quichex.Config do
       {:error, reason} -> raise Error, operation: :config_enable_dgram, reason: reason
     end
   end
+
+  @doc """
+  Sets the maximum UDP payload size for receiving packets.
+
+  This is critical for proper QUIC operation, especially for TLS handshake.
+  The recommended value is 1350 bytes to avoid IP fragmentation.
+
+  ## Examples
+
+      config
+      |> Quichex.Config.set_max_recv_udp_payload_size(1350)
+
+  """
+  @spec set_max_recv_udp_payload_size(t(), pos_integer()) :: t()
+  def set_max_recv_udp_payload_size(%__MODULE__{resource: resource} = config, size) when is_integer(size) and size > 0 do
+    case Native.config_set_max_recv_udp_payload_size(resource, size) do
+      {:ok, _} -> config
+      {:error, reason} -> raise Error, operation: :config_set_max_recv_udp_payload_size, reason: reason
+    end
+  end
+
+  @doc """
+  Sets the maximum UDP payload size for sending packets.
+
+  This is critical for proper QUIC operation, especially for TLS handshake.
+  The recommended value is 1350 bytes to avoid IP fragmentation.
+
+  ## Examples
+
+      config
+      |> Quichex.Config.set_max_send_udp_payload_size(1350)
+
+  """
+  @spec set_max_send_udp_payload_size(t(), pos_integer()) :: t()
+  def set_max_send_udp_payload_size(%__MODULE__{resource: resource} = config, size) when is_integer(size) and size > 0 do
+    case Native.config_set_max_send_udp_payload_size(resource, size) do
+      {:ok, _} -> config
+      {:error, reason} -> raise Error, operation: :config_set_max_send_udp_payload_size, reason: reason
+    end
+  end
+
+  @doc """
+  Disables or enables active connection migration.
+
+  When disabled (true), the connection will not migrate to different network paths.
+  This is recommended for initial implementations and simpler network scenarios.
+
+  ## Examples
+
+      config
+      |> Quichex.Config.set_disable_active_migration(true)
+
+  """
+  @spec set_disable_active_migration(t(), boolean()) :: t()
+  def set_disable_active_migration(%__MODULE__{resource: resource} = config, disable) when is_boolean(disable) do
+    case Native.config_set_disable_active_migration(resource, disable) do
+      {:ok, _} -> config
+      {:error, reason} -> raise Error, operation: :config_set_disable_active_migration, reason: reason
+    end
+  end
+
+  @doc """
+  Enables or disables GREASE.
+
+  GREASE (Generate Random Extensions And Sustain Extensibility) helps test
+  protocol extensibility by sending random values. Enabled by default in quiche.
+
+  ## Examples
+
+      config
+      |> Quichex.Config.grease(true)
+
+  """
+  @spec grease(t(), boolean()) :: t()
+  def grease(%__MODULE__{resource: resource} = config, enable) when is_boolean(enable) do
+    case Native.config_grease(resource, enable) do
+      {:ok, _} -> config
+      {:error, reason} -> raise Error, operation: :config_grease, reason: reason
+    end
+  end
 end

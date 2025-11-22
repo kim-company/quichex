@@ -22,7 +22,8 @@ defmodule Quichex.Connection do
     :server_name,
     :scid,
     established: false,
-    closed: false
+    closed: false,
+    waiters: []
   ]
 
   @type t :: %__MODULE__{}
@@ -197,9 +198,9 @@ defmodule Quichex.Connection do
     {:reply, {:error, :connection_closed}, state}
   end
 
-  def handle_call(:wait_connected, _from, state) do
-    # TODO: track waiters and reply when established
-    {:reply, {:error, :not_yet_implemented}, state}
+  def handle_call(:wait_connected, from, state) do
+    # Add to waiters list - will be replied to when connection is established
+    {:noreply, %{state | waiters: [from | state.waiters]}}
   end
 
   def handle_call(:is_established?, _from, state) do
@@ -273,7 +274,12 @@ defmodule Quichex.Connection do
                   send(state.controlling_process, {:quic_connected, self()})
                 end
 
-                %{state | established: true}
+                # Reply to all waiters
+                Enum.each(state.waiters, fn from ->
+                  GenServer.reply(from, :ok)
+                end)
+
+                %{state | established: true, waiters: []}
               else
                 state
               end

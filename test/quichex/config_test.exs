@@ -211,5 +211,90 @@ defmodule Quichex.ConfigTest do
 
       assert %Config{} = config
     end
+
+    test "creates a config with UDP payload sizes for TLS handshake" do
+      config =
+        Config.new!()
+        |> Config.set_application_protos(["hq-interop"])
+        |> Config.verify_peer(false)
+        |> Config.set_max_recv_udp_payload_size(1350)
+        |> Config.set_max_send_udp_payload_size(1350)
+        |> Config.set_disable_active_migration(true)
+        |> Config.grease(true)
+
+      assert %Config{} = config
+    end
+  end
+
+  describe "set_max_recv_udp_payload_size/2" do
+    test "sets max receive UDP payload size" do
+      config =
+        Config.new!()
+        |> Config.set_max_recv_udp_payload_size(1350)
+
+      assert %Config{} = config
+    end
+
+    test "sets custom receive UDP payload size" do
+      config =
+        Config.new!()
+        |> Config.set_max_recv_udp_payload_size(1200)
+
+      assert %Config{} = config
+    end
+  end
+
+  describe "set_max_send_udp_payload_size/2" do
+    test "sets max send UDP payload size" do
+      config =
+        Config.new!()
+        |> Config.set_max_send_udp_payload_size(1350)
+
+      assert %Config{} = config
+    end
+
+    test "sets custom send UDP payload size" do
+      config =
+        Config.new!()
+        |> Config.set_max_send_udp_payload_size(1200)
+
+      assert %Config{} = config
+    end
+  end
+
+  describe "set_disable_active_migration/2" do
+    test "disables active migration" do
+      config =
+        Config.new!()
+        |> Config.set_disable_active_migration(true)
+
+      assert %Config{} = config
+    end
+
+    test "enables active migration" do
+      config =
+        Config.new!()
+        |> Config.set_disable_active_migration(false)
+
+      assert %Config{} = config
+    end
+  end
+
+  describe "grease/2" do
+    test "enables GREASE" do
+      config =
+        Config.new!()
+        |> Config.grease(true)
+
+      assert %Config{} = config
+    end
+
+    test "disables GREASE" do
+      config =
+        Config.new!()
+        |> Config.grease(false)
+
+      assert %Config{} = config
+    end
   end
 end

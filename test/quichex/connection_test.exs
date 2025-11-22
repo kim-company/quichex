@@ -149,32 +149,42 @@ defmodule Quichex.ConnectionTest do
     end
   end
 
-  # NOTE: The following test requires a running QUIC server.
-  # To test against cloudflare-quic.com (public test server):
-  #
-  # @tag :external
-  # test "connects to cloudflare-quic.com" do
-  #   config =
-  #     Config.new!()
-  #     |> Config.set_application_protos(["hq-interop"])
-  #     |> Config.verify_peer(false)
-  #     |> Config.set_max_idle_timeout(5000)
-  #
-  #   {:ok, pid} = Connection.connect(
-  #     host: "cloudflare-quic.com",
-  #     port: 443,
-  #     config: config
-  #   )
-  #
-  #   # Wait for handshake
-  #   assert :ok = Connection.wait_connected(pid, timeout: 10_000)
-  #
-  #   # Connection should be established
-  #   assert Connection.is_established?(pid)
-  #
-  #   {:ok, info} = Connection.info(pid)
-  #   assert info.is_established
-  #
-  #   Connection.close(pid)
-  # end
+  # NOTE: The following test requires internet connectivity and connects to a real QUIC server.
+  # Tagged as :external so it can be excluded from local testing with: mix test --exclude external
+  @tag :external
+  test "connects to cloudflare-quic.com with proper TLS handshake" do
+    config =
+      Config.new!()
+      |> Config.set_application_protos(["hq-interop"])
+      |> Config.verify_peer(false)
+      |> Config.set_max_idle_timeout(5000)
+      # Critical: Set UDP payload sizes for proper TLS handshake
+      |> Config.set_max_recv_udp_payload_size(1350)
+      |> Config.set_max_send_udp_payload_size(1350)
+      |> Config.set_disable_active_migration(true)
+      # Critical: Set flow control limits (default to 0 in quiche)
+      |> Config.set_initial_max_data(10_000_000)
+      |> Config.set_initial_max_stream_data_bidi_local(1_000_000)
+      |> Config.set_initial_max_stream_data_bidi_remote(1_000_000)
+      |> Config.set_initial_max_stream_data_uni(1_000_000)
+      |> Config.set_initial_max_streams_bidi(100)
+      |> Config.set_initial_max_streams_uni(100)
+
+    {:ok, pid} = Connection.connect(
+      host: "cloudflare-quic.com",
+      port: 443,
+      config: config
+    )
+
+    # Wait for handshake to complete (should succeed with UDP payload sizes configured)
+    assert :ok = Connection.wait_connected(pid, timeout: 10_000)
+
+    # Connection should be established
+    assert Connection.is_established?(pid)
+
+    {:ok, info} = Connection.info(pid)
+    assert info.is_established
+
+    Connection.close(pid)
+  end
 end
