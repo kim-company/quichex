@@ -320,38 +320,38 @@ When `active: true` (default), the connection sends messages to the controlling 
 
 ### TODOs:
 
-- [ ] Create new Mix project: `mix new quichex --sup`
-- [ ] Add dependencies to `mix.exs`:
-  - [ ] `{:rustler, "~> 0.35"}`
-  - [ ] `{:ex_doc, "~> 0.34", only: :dev}`
-  - [ ] `{:dialyxir, "~> 1.4", only: :dev, runtime: false}`
-  - [ ] `{:credo, "~> 1.7", only: :dev, runtime: false}`
-- [ ] Run `mix rustler.new` to create NIF boilerplate
-- [ ] Configure `native/quichex_nif/Cargo.toml`:
-  - [ ] Add dependency on quiche from local path: `quiche = { path = "../../../quiche", features = ["boringssl-boring-crate"] }`
-  - [ ] Add dependency: `rustler = "0.35"`
-  - [ ] Add dependency: `lazy_static = "1.5"` (for resource registration)
-- [ ] Create basic module structure:
-  - [ ] `lib/quichex.ex` - Main module with version info
-  - [ ] `lib/quichex/nif.ex` - NIF loading and stubs
-  - [ ] `lib/quichex/config.ex` - Config struct and builder
-  - [ ] `lib/quichex/connection.ex` - Connection GenServer (stub)
-- [ ] Implement basic "hello world" NIF to verify Rustler works
+- [x] Create new Mix project: `mix new quichex --sup`
+- [x] Add dependencies to `mix.exs`:
+  - [x] `{:rustler, "~> 0.37.1"}`
+  - [x] `{:ex_doc, "~> 0.34", only: :dev}`
+  - [ ] ~~`{:dialyxir, "~> 1.4", only: :dev, runtime: false}`~~ (skipped)
+  - [ ] ~~`{:credo, "~> 1.7", only: :dev, runtime: false}`~~ (skipped)
+- [x] Run `mix rustler.new` to create NIF boilerplate
+- [x] Configure `native/quichex_nif/Cargo.toml`:
+  - [ ] Add dependency on quiche from local path: `quiche = { path = "../../../quiche", features = ["boringssl-boring-crate"] }` (deferred to Milestone 2)
+  - [x] Add dependency: `rustler = "0.37.0"`
+  - [x] Add dependency: `lazy_static = "1.5"` (for resource registration)
+- [x] Create basic module structure:
+  - [x] `lib/quichex.ex` - Main module with version info
+  - [x] `lib/quichex/native.ex` - NIF loading and stubs (created as `Native` instead of `NIF`)
+  - [x] `lib/quichex/config.ex` - Config struct and builder
+  - [x] `lib/quichex/connection.ex` - Connection GenServer (stub)
+- [x] Implement basic "hello world" NIF to verify Rustler works
 - [ ] Set up GitHub Actions CI:
   - [ ] Rust stable compilation
   - [ ] Mix tests
   - [ ] Mix format check
-  - [ ] Credo
-  - [ ] Dialyzer
-- [ ] Write `README.md` with project overview
-- [ ] Set up `mix docs` with examples
+  - [ ] ~~Credo~~ (skipped)
+  - [ ] ~~Dialyzer~~ (skipped)
+- [x] Write `README.md` with project overview
+- [x] Set up `mix docs` with examples (ExDoc dependency added)
 - [ ] Add `LICENSE` file (same as quiche: BSD-2-Clause)
 
 ### Acceptance Criteria:
-- `mix compile` succeeds and builds Rust NIF
-- `mix test` runs (even with empty tests)
-- Basic NIF function can be called from Elixir
-- CI pipeline passes
+- ✅ `mix compile` succeeds and builds Rust NIF
+- ✅ `mix test` runs (even with empty tests)
+- ✅ Basic NIF function can be called from Elixir
+- [ ] CI pipeline passes (not yet set up)
 
 ---
 
