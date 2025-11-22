@@ -534,6 +534,66 @@ When `active: true` (default), the connection sends messages to the controlling 
 - ✅ No memory leaks (Rust resources properly managed)
 - ⚠️ Connection to real servers not yet tested (needs Milestone 4 for stream operations)
 
+### What You Can Do Now (Practical Usage):
+
+**✅ Working Features:**
+1. **Configuration Management** - Full builder pattern with all options
+2. **Connection Lifecycle** - Create, query state, and close connections
+3. **Multiple Concurrent Connections** - Manage many connections simultaneously
+4. **Connection Metadata** - Query local/peer addresses, server name, state
+5. **UDP Socket Management** - Automatic socket creation and cleanup
+6. **Connection ID Generation** - Secure random SCID generation
+
+**Example:**
+```elixir
+# Create optimized config
+config = Quichex.Config.new!()
+  |> Quichex.Config.set_application_protos(["h3"])
+  |> Quichex.Config.set_max_idle_timeout(30_000)
+  |> Quichex.Config.set_initial_max_streams_bidi(100)
+  |> Quichex.Config.verify_peer(false)
+
+# Start connection
+{:ok, conn} = Quichex.Connection.connect(
+  host: "example.com",
+  port: 443,
+  config: config
+)
+
+# Query connection
+{:ok, info} = Quichex.Connection.info(conn)
+# => %{local_address: {{0,0,0,0}, 12345}, peer_address: {{1,1,1,1}, 443}, ...}
+
+# Close gracefully
+Quichex.Connection.close(conn)
+```
+
+**❌ Known Limitations:**
+
+1. **TLS Handshake Fails** - Critical blocker for real connections
+   - Symptoms: Connections start but don't establish
+   - Error: `Error::TlsFail` from quiche (logged as "Send error: tls_fail")
+   - Impact: Cannot connect to cloudflare-quic.com or any real QUIC server
+   - Likely causes:
+     - Missing CA certificate configuration even with `verify_peer(false)`
+     - BoringSSL initialization issue
+     - ALPN negotiation problem
+     - Quiche TLS configuration requirements not fully met
+   - Investigation needed in Milestone 4
+
+2. **No Stream Operations** - Can't send/receive application data
+   - Milestone 4 dependency
+   - Need: `stream_send`, `stream_recv`, stream multiplexing
+
+3. **No Server Mode** - Can't accept incoming connections
+   - Milestone 5 dependency
+
+4. **No Active Mode Notifications** - `{:quic_connected, pid}` not yet emitted
+   - Connection establishment detection implemented
+   - Active mode message sending not yet triggered (TLS handshake never completes)
+
+**Test Coverage:** All infrastructure tests pass, but real-world connection tests require TLS fix
+
 ---
 
 ## Milestone 4: Stream Operations 📊
