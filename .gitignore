@@ -25,3 +25,4 @@ quichex-*.tar
 
 # Rust binary artifacts
 /target/
+*.so
