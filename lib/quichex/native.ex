@@ -26,5 +26,22 @@ defmodule Quichex.Native do
   def config_set_cc_algorithm(_config, _algo), do: error()
   def config_enable_dgram(_config, _enabled, _recv_queue_len, _send_queue_len), do: error()
 
+  # Connection NIFs
+  def connection_new_client(_scid, _server_name, _local_addr, _peer_addr, _config), do: error()
+  def connection_recv(_conn, _packet, _recv_info), do: error()
+  def connection_send(_conn), do: error()
+  def connection_timeout(_conn), do: error()
+  def connection_on_timeout(_conn), do: error()
+  def connection_is_established(_conn), do: error()
+  def connection_is_closed(_conn), do: error()
+  def connection_is_draining(_conn), do: error()
+  def connection_close(_conn, _app, _err, _reason), do: error()
+  def connection_trace_id(_conn), do: error()
+  def connection_source_id(_conn), do: error()
+  def connection_destination_id(_conn), do: error()
+  def connection_application_proto(_conn), do: error()
+  def connection_peer_cert(_conn), do: error()
+  def connection_is_in_early_data(_conn), do: error()
+
   defp error, do: :erlang.nif_error(:nif_not_loaded)
 end
