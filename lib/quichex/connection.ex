@@ -23,7 +23,10 @@ defmodule Quichex.Connection do
     :scid,
     established: false,
     closed: false,
-    waiters: []
+    waiters: [],
+    next_bidi_stream: 0,
+    next_uni_stream: 0,
+    streams: %{}
   ]
 
   @type t :: %__MODULE__{}
@@ -113,6 +116,76 @@ defmodule Quichex.Connection do
     GenServer.call(pid, :info)
   end
 
+  @doc """
+  Opens a new stream.
+
+  ## Options
+
+    * `:type` - Stream type: `:bidirectional` or `:unidirectional` (required)
+
+  Returns `{:ok, stream_id}` on success.
+  """
+  @spec open_stream(pid(), :bidirectional | :unidirectional) :: {:ok, non_neg_integer()} | {:error, term()}
+  def open_stream(pid, type) when type in [:bidirectional, :unidirectional] do
+    GenServer.call(pid, {:open_stream, type})
+  end
+
+  @doc """
+  Sends data on a stream.
+
+  ## Options
+
+    * `:fin` - Whether to mark this as the final data on stream (default: false)
+
+  """
+  @spec stream_send(pid(), non_neg_integer(), binary(), keyword()) :: :ok | {:error, term()}
+  def stream_send(pid, stream_id, data, opts \\ []) do
+    fin = Keyword.get(opts, :fin, false)
+    GenServer.call(pid, {:stream_send, stream_id, data, fin})
+  end
+
+  @doc """
+  Receives data from a stream (passive mode).
+
+  Returns `{:ok, data, fin?}` where `fin?` indicates if this is the last data.
+  """
+  @spec stream_recv(pid(), non_neg_integer(), non_neg_integer()) :: {:ok, binary(), boolean()} | {:error, term()}
+  def stream_recv(pid, stream_id, max_len \\ 65535) do
+    GenServer.call(pid, {:stream_recv, stream_id, max_len})
+  end
+
+  @doc """
+  Gets list of streams that have data to read.
+  """
+  @spec readable_streams(pid()) :: {:ok, [non_neg_integer()]} | {:error, term()}
+  def readable_streams(pid) do
+    GenServer.call(pid, :readable_streams)
+  end
+
+  @doc """
+  Gets list of streams that can be written to.
+  """
+  @spec writable_streams(pid()) :: {:ok, [non_neg_integer()]} | {:error, term()}
+  def writable_streams(pid) do
+    GenServer.call(pid, :writable_streams)
+  end
+
+  @doc """
+  Shuts down a stream in the specified direction.
+
+  ## Arguments
+
+    * `direction` - `:read`, `:write`, or `:both`
+    * `opts` - Options
+      * `:error_code` - Error code to send (default: 0)
+
+  """
+  @spec stream_shutdown(pid(), non_neg_integer(), :read | :write | :both, keyword()) :: :ok | {:error, term()}
+  def stream_shutdown(pid, stream_id, direction, opts \\ []) when direction in [:read, :write, :both] do
+    error_code = Keyword.get(opts, :error_code, 0)
+    GenServer.call(pid, {:stream_shutdown, stream_id, direction, error_code})
+  end
+
   ## GenServer Callbacks
 
   @impl true
@@ -150,6 +223,12 @@ defmodule Quichex.Connection do
     # Generate random connection ID (16 bytes)
     scid = :crypto.strong_rand_bytes(16)
 
+    # Get the parent process (the one that called connect/1)
+    parent_pid = case Process.get(:"$callers") do
+      [caller | _] -> caller
+      _ -> self()
+    end
+
     # Create QUIC connection
     #Convert address tuples to format Rustler can decode
     local_addr_arg = format_address(local_addr)
@@ -169,7 +248,7 @@ defmodule Quichex.Connection do
           local_addr: local_addr,
           peer_addr: peer_addr,
           config: config,
-          controlling_process: self(),
+          controlling_process: parent_pid,
           active: active,
           server_name: host,
           scid: scid
@@ -204,9 +283,14 @@ defmodule Quichex.Connection do
   end
 
   def handle_call(:is_established?, _from, state) do
-    case Native.connection_is_established(state.conn_resource) do
-      {:ok, is_established} -> {:reply, is_established, %{state | established: is_established}}
-      {:error, _} -> {:reply, false, state}
+    # Check local state first - if we've closed, we're not established
+    if state.closed do
+      {:reply, false, state}
+    else
+      case Native.connection_is_established(state.conn_resource) do
+        {:ok, is_established} -> {:reply, is_established, %{state | established: is_established}}
+        {:error, _} -> {:reply, false, state}
+      end
     end
   end
 
@@ -230,11 +314,11 @@ defmodule Quichex.Connection do
       {:ok, _} ->
         # Send final packets
         state = send_pending_packets(state)
-        {:reply, :ok, %{state | closed: true}}
+        {:reply, :ok, %{state | closed: true, established: false}}
 
       {:error, "Close error: done"} ->
         # Connection already closed or nothing to close - treat as success
-        {:reply, :ok, %{state | closed: true}}
+        {:reply, :ok, %{state | closed: true, established: false}}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -251,6 +335,108 @@ defmodule Quichex.Connection do
     }
 
     {:reply, {:ok, info}, state}
+  end
+
+  def handle_call({:open_stream, type}, _from, state) do
+    # Client-initiated streams:
+    # - Bidirectional: 0, 4, 8, 12, ... (multiples of 4)
+    # - Unidirectional: 2, 6, 10, 14, ... (2 + multiples of 4)
+    # Server-initiated streams:
+    # - Bidirectional: 1, 5, 9, 13, ... (1 + multiples of 4)
+    # - Unidirectional: 3, 7, 11, 15, ... (3 + multiples of 4)
+
+    {stream_id, new_state} = case type do
+      :bidirectional ->
+        id = state.next_bidi_stream * 4
+        {id, %{state | next_bidi_stream: state.next_bidi_stream + 1}}
+
+      :unidirectional ->
+        id = 2 + state.next_uni_stream * 4
+        {id, %{state | next_uni_stream: state.next_uni_stream + 1}}
+    end
+
+    stream_info = %{
+      type: type,
+      fin_sent: false,
+      fin_received: false
+    }
+
+    new_state = %{new_state | streams: Map.put(new_state.streams, stream_id, stream_info)}
+
+    {:reply, {:ok, stream_id}, new_state}
+  end
+
+  def handle_call({:stream_send, stream_id, data, fin}, _from, state) do
+    case Native.connection_stream_send(state.conn_resource, stream_id, data, fin) do
+      {:ok, _bytes_written} ->
+        # Update stream state
+        state = if fin do
+          update_in(state.streams[stream_id], fn info ->
+            if info, do: %{info | fin_sent: true}, else: %{type: :unknown, fin_sent: true, fin_received: false}
+          end)
+        else
+          state
+        end
+
+        # Send any pending packets
+        state = send_pending_packets(state)
+
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:stream_recv, stream_id, max_len}, _from, state) do
+    case Native.connection_stream_recv(state.conn_resource, stream_id, max_len) do
+      {:ok, {data, fin}} ->
+        # Update stream state
+        state = if fin do
+          update_in(state.streams[stream_id], fn info ->
+            if info, do: %{info | fin_received: true}, else: %{type: :unknown, fin_sent: false, fin_received: true}
+          end)
+        else
+          state
+        end
+
+        {:reply, {:ok, data, fin}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(:readable_streams, _from, state) do
+    case Native.connection_readable_streams(state.conn_resource) do
+      {:ok, streams} -> {:reply, {:ok, streams}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(:writable_streams, _from, state) do
+    case Native.connection_writable_streams(state.conn_resource) do
+      {:ok, streams} -> {:reply, {:ok, streams}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:stream_shutdown, stream_id, direction, error_code}, _from, state) do
+    direction_str = case direction do
+      :read -> "read"
+      :write -> "write"
+      :both -> "both"
+    end
+
+    case Native.connection_stream_shutdown(state.conn_resource, stream_id, direction_str, error_code) do
+      {:ok, _} ->
+        # Send any pending packets
+        state = send_pending_packets(state)
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   @impl true
@@ -270,7 +456,7 @@ defmodule Quichex.Connection do
             {:ok, true} ->
               if not state.established do
                 # Connection just became established
-                if state.active do
+                if state.active and state.controlling_process != self() do
                   send(state.controlling_process, {:quic_connected, self()})
                 end
 
@@ -287,6 +473,13 @@ defmodule Quichex.Connection do
             _ ->
               state
           end
+
+        # Check for readable streams and process them (active mode)
+        state = if state.active do
+          process_readable_streams(state)
+        else
+          state
+        end
 
         # Send any packets generated in response
         state = send_pending_packets(state)
@@ -395,6 +588,48 @@ defmodule Quichex.Connection do
 
       {:error, _reason} ->
         # Ignore error, connection might be closed
+        state
+    end
+  end
+
+  defp process_readable_streams(state) do
+    case Native.connection_readable_streams(state.conn_resource) do
+      {:ok, readable_streams} ->
+        Enum.reduce(readable_streams, state, fn stream_id, acc_state ->
+          process_stream_data(acc_state, stream_id)
+        end)
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  defp process_stream_data(state, stream_id) do
+    # Read all available data from the stream
+    case Native.connection_stream_recv(state.conn_resource, stream_id, 65535) do
+      {:ok, {data, fin}} ->
+        # Send message to controlling process (only if it's not ourselves)
+        if byte_size(data) > 0 and state.controlling_process != self() do
+          send(state.controlling_process, {:quic_stream, self(), stream_id, data})
+        end
+
+        if fin do
+          if state.controlling_process != self() do
+            send(state.controlling_process, {:quic_stream_fin, self(), stream_id})
+          end
+
+          # Update stream state
+          new_state = update_in(state.streams[stream_id], fn info ->
+            if info, do: %{info | fin_received: true}, else: %{type: :unknown, fin_sent: false, fin_received: true}
+          end)
+
+          new_state
+        else
+          state
+        end
+
+      {:error, _reason} ->
+        # Could be "done" or other error - just stop reading this stream
         state
     end
   end

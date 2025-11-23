@@ -48,5 +48,13 @@ defmodule Quichex.Native do
   def connection_peer_cert(_conn), do: error()
   def connection_is_in_early_data(_conn), do: error()
 
+  # Stream NIFs
+  def connection_stream_send(_conn, _stream_id, _data, _fin), do: error()
+  def connection_stream_recv(_conn, _stream_id, _max_len), do: error()
+  def connection_readable_streams(_conn), do: error()
+  def connection_writable_streams(_conn), do: error()
+  def connection_stream_finished(_conn, _stream_id), do: error()
+  def connection_stream_shutdown(_conn, _stream_id, _direction, _err_code), do: error()
+
   defp error, do: :erlang.nif_error(:nif_not_loaded)
 end

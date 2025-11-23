@@ -272,3 +272,119 @@ pub fn connection_is_in_early_data(conn: ResourceArc<ConnectionResource>) -> Res
 
     Ok(connection.is_in_early_data())
 }
+
+/// Sends data on a stream
+#[rustler::nif]
+pub fn connection_stream_send(
+    conn: ResourceArc<ConnectionResource>,
+    stream_id: u64,
+    data: Binary,
+    fin: bool,
+) -> Result<usize, String> {
+    let mut connection = conn
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    connection
+        .stream_send(stream_id, data.as_slice(), fin)
+        .map_err(|e| format!("Stream send error: {}", quiche_error_to_string(e)))
+}
+
+/// Receives data from a stream
+#[rustler::nif]
+pub fn connection_stream_recv(
+    conn: ResourceArc<ConnectionResource>,
+    stream_id: u64,
+    max_len: usize,
+) -> Result<(Vec<u8>, bool), String> {
+    let mut connection = conn
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    let mut buf = vec![0u8; max_len];
+
+    match connection.stream_recv(stream_id, &mut buf) {
+        Ok((read, fin)) => {
+            buf.truncate(read);
+            Ok((buf, fin))
+        }
+        Err(e) => Err(format!("Stream recv error: {}", quiche_error_to_string(e))),
+    }
+}
+
+/// Gets list of streams that have data to read
+#[rustler::nif]
+pub fn connection_readable_streams(
+    conn: ResourceArc<ConnectionResource>,
+) -> Result<Vec<u64>, String> {
+    let connection = conn
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    let streams: Vec<u64> = connection.readable().collect();
+    Ok(streams)
+}
+
+/// Gets list of streams that can be written to
+#[rustler::nif]
+pub fn connection_writable_streams(
+    conn: ResourceArc<ConnectionResource>,
+) -> Result<Vec<u64>, String> {
+    let connection = conn
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    let streams: Vec<u64> = connection.writable().collect();
+    Ok(streams)
+}
+
+/// Checks if a stream has finished reading
+#[rustler::nif]
+pub fn connection_stream_finished(
+    conn: ResourceArc<ConnectionResource>,
+    stream_id: u64,
+) -> Result<bool, String> {
+    let connection = conn
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    Ok(connection.stream_finished(stream_id))
+}
+
+/// Shuts down stream in the specified direction
+#[rustler::nif]
+pub fn connection_stream_shutdown(
+    conn: ResourceArc<ConnectionResource>,
+    stream_id: u64,
+    direction: String,
+    err_code: u64,
+) -> Result<(), String> {
+    let mut connection = conn
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    let shutdown = match direction.as_str() {
+        "read" => quiche::Shutdown::Read,
+        "write" => quiche::Shutdown::Write,
+        "both" => {
+            // Shutdown both directions - ignore Done errors
+            let _ = connection.stream_shutdown(stream_id, quiche::Shutdown::Read, err_code);
+            let _ = connection.stream_shutdown(stream_id, quiche::Shutdown::Write, err_code);
+            return Ok(());
+        }
+        _ => return Err(format!("Invalid direction: {}", direction)),
+    };
+
+    connection
+        .stream_shutdown(stream_id, shutdown, err_code)
+        .or_else(|e| match e {
+            quiche::Error::Done => Ok(()), // Treat Done as success
+            _ => Err(format!("Stream shutdown error: {}", quiche_error_to_string(e)))
+        })
+}
