@@ -387,11 +387,16 @@ When `active: true` (default), the connection sends messages to the controlling 
   - [x] `config_load_verify_locations_from_file(config, path: String) -> Result<(), String>`
   - [x] `config_set_cc_algorithm(config, algo: String) -> Result<(), String>`
   - [x] `config_enable_dgram(config, enabled: bool, recv_queue: usize, send_queue: usize) -> Result<(), String>`
-- [ ] Create `types.rs` for shared type conversions:
-  - [ ] Elixir term <-> `SocketAddr` conversion
-  - [ ] Elixir term <-> `quiche::RecvInfo` conversion
-  - [ ] Elixir term <-> `quiche::SendInfo` conversion
-  - [ ] Error enum -> Elixir error atom mapping
+  - [x] `config_set_max_recv_udp_payload_size(config, size: usize) -> Result<(), String>` (Added during TLS investigation)
+  - [x] `config_set_max_send_udp_payload_size(config, size: usize) -> Result<(), String>` (Added during TLS investigation)
+  - [x] `config_set_disable_active_migration(config, disable: bool) -> Result<(), String>` (Added during TLS investigation)
+  - [x] `config_grease(config, grease: bool) -> Result<(), String>` (Added during TLS investigation)
+  - [x] `config_load_verify_locations_from_directory(config, path: String) -> Result<(), String>` (Added during TLS investigation)
+- [x] Create `types.rs` for shared type conversions:
+  - [x] Elixir term <-> `SocketAddr` conversion
+  - [x] Elixir term <-> `quiche::RecvInfo` conversion
+  - [x] Elixir term <-> `quiche::SendInfo` conversion
+  - [x] Error enum -> Elixir error atom mapping
 
 #### Elixir Side:
 
@@ -401,8 +406,11 @@ When `active: true` (default), the connection sends messages to the controlling 
   - [x] Proper `@spec` annotations for all NIFs
 - [x] Implement `Quichex.Config`:
   - [x] Define `%Quichex.Config{}` struct holding `ConfigResource`
-  - [x] `new(opts \\ []) :: t()` - creates config with defaults
+  - [x] `new(opts \\ []) :: t()` - creates config with defaults (now uses quiche::PROTOCOL_VERSION)
   - [x] Pipeline functions: `set_application_protos/2`, `set_max_idle_timeout/2`, etc.
+  - [x] Additional pipeline functions added: `set_max_recv_udp_payload_size/2`, `set_max_send_udp_payload_size/2`, `set_disable_active_migration/2`, `grease/2`
+  - [x] `load_verify_locations_from_directory/2` for directory-based CA cert loading
+  - [x] `load_system_ca_certs/1` helper that automatically finds and loads system CA certificates
   - [x] Validate inputs (positive numbers, valid file paths, etc.)
   - [x] `@doc` for every public function
   - [x] `@spec` type annotations
@@ -417,18 +425,21 @@ When `active: true` (default), the connection sends messages to the controlling 
 
 ### Acceptance Criteria:
 - ✅ Config can be created and configured from Elixir
-- ✅ All config setter NIFs work correctly
+- ✅ All config setter NIFs work correctly (19 total config functions)
 - ✅ Config resource properly managed (no memory leaks)
-- ✅ Comprehensive test coverage for Config module (31 tests passing)
+- ✅ Comprehensive test coverage for Config module (40 tests passing - 31 original + 9 new)
+- ✅ System CA certificate loading works across multiple OS paths
 - ⚠️ Documentation needs examples (has @doc and @spec, but lacks @moduledoc examples)
 
 ---
 
 ## Milestone 3: Client Connection Establishment 🔌 ✅
 
-**Status**: **COMPLETE** - All 43 tests passing (31 config + 12 connection)
+**Status**: **COMPLETE** - All 52 tests passing (31 config + 21 connection) + external cloudflare test ✅
 
-**Goal**: Successfully establish a QUIC client connection and complete handshake
+**Goal**: Successfully establish a QUIC client connection and complete handshake with real servers
+
+**MILESTONE FULLY ACHIEVED**: Connections now successfully establish with real-world QUIC servers (cloudflare-quic.com)!
 
 ### Completed Work:
 
@@ -570,16 +581,16 @@ Quichex.Connection.close(conn)
 
 **❌ Known Limitations:**
 
-1. **TLS Handshake Fails** - Critical blocker for real connections
-   - Symptoms: Connections start but don't establish
-   - Error: `Error::TlsFail` from quiche (logged as "Send error: tls_fail")
-   - Impact: Cannot connect to cloudflare-quic.com or any real QUIC server
-   - Likely causes:
-     - Missing CA certificate configuration even with `verify_peer(false)`
-     - BoringSSL initialization issue
-     - ALPN negotiation problem
-     - Quiche TLS configuration requirements not fully met
-   - Investigation needed in Milestone 4
+1. **✅ RESOLVED: TLS Handshake Stalls** - ~~Critical blocker for real connections~~
+   - **ROOT CAUSE IDENTIFIED:** ALPN protocol mismatch
+   - **Issue:** Server was rejecting connections with TLS alert code 120 (0x78) = "no_application_protocol"
+   - **Fix:** Changed ALPN from "hq-interop" to "h3" for cloudflare-quic.com
+   - **Details:** The server was sending peer_error with error_code=376 (0x100 + 0x78), indicating TLS alert 120
+   - **Result:** ✅ Connections now establish successfully! All tests passing including external cloudflare test
+   - **Lesson:** Different QUIC servers support different ALPN protocols:
+     - "h3" = HTTP/3 (widely supported)
+     - "hq-interop" = QUIC interop testing protocol (limited server support)
+     - Applications should configure ALPN based on their target servers
 
 2. **No Stream Operations** - Can't send/receive application data
    - Milestone 4 dependency

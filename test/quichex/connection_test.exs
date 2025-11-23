@@ -153,9 +153,9 @@ defmodule Quichex.ConnectionTest do
   # Tagged as :external so it can be excluded from local testing with: mix test --exclude external
   @tag :external
   test "connects to cloudflare-quic.com with proper TLS handshake" do
-    config =
-      Config.new!()
-      |> Config.set_application_protos(["hq-interop"])
+    # Create base config - use "h3" protocol which cloudflare-quic.com supports
+    base_config = Config.new!()
+      |> Config.set_application_protos(["h3"])
       |> Config.verify_peer(false)
       |> Config.set_max_idle_timeout(5000)
       # Critical: Set UDP payload sizes for proper TLS handshake
@@ -170,10 +170,19 @@ defmodule Quichex.ConnectionTest do
       |> Config.set_initial_max_streams_bidi(100)
       |> Config.set_initial_max_streams_uni(100)
 
+    # Critical: Load system CA certificates (required for TLS even with verify_peer(false))
+    config = case Config.load_system_ca_certs(base_config) do
+      {:ok, cfg} -> cfg
+      {:error, reason} ->
+        IO.puts("Warning: Could not load system CA certs: #{reason}")
+        base_config
+    end
+
     {:ok, pid} = Connection.connect(
       host: "cloudflare-quic.com",
       port: 443,
-      config: config
+      config: config,
+      active: false  # Don't send messages to ourselves
     )
 
     # Wait for handshake to complete (should succeed with UDP payload sizes configured)

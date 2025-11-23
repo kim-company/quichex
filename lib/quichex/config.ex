@@ -9,11 +9,12 @@ defmodule Quichex.Config do
   alias Quichex.Native.Error
   defstruct [:resource]
   @type t :: %__MODULE__{resource: reference()}
-  @quic_version_1 0x0000_0001
+  # Use 0 to let quiche choose PROTOCOL_VERSION, or specify 0x0000_0001 for QUIC v1
+  @default_version 0
 
   @spec new(keyword()) :: {:ok, t()} | {:error, String.t()}
   def new(opts \\ []) do
-    version = Keyword.get(opts, :version, @quic_version_1)
+    version = Keyword.get(opts, :version, @default_version)
     case Native.config_new(version) do
       {:ok, resource} -> {:ok, %__MODULE__{resource: resource}}
       {:error, reason} -> {:error, reason}
@@ -121,6 +122,66 @@ defmodule Quichex.Config do
     case Native.config_load_verify_locations_from_file(resource, path) do
       {:ok, _} -> config
       {:error, reason} -> raise Error, operation: :config_load_verify_locations_from_file, reason: reason
+    end
+  end
+
+  @spec load_verify_locations_from_directory(t(), String.t()) :: t()
+  def load_verify_locations_from_directory(%__MODULE__{resource: resource} = config, path) when is_binary(path) do
+    case Native.config_load_verify_locations_from_directory(resource, path) do
+      {:ok, _} -> config
+      {:error, reason} -> raise Error, operation: :config_load_verify_locations_from_directory, reason: reason
+    end
+  end
+
+  @doc """
+  Attempts to load system CA certificates for TLS verification.
+
+  This tries common system CA certificate locations for different operating systems.
+  Even when verify_peer is false, loading CA certs may be required for TLS handshake.
+
+  Returns {:ok, config} if successful, {:error, reason} if all attempts fail.
+  """
+  @spec load_system_ca_certs(t()) :: {:ok, t()} | {:error, String.t()}
+  def load_system_ca_certs(%__MODULE__{} = config) do
+    # Common CA cert locations across different OSes
+    locations = [
+      "/etc/ssl/certs/ca-certificates.crt",  # Debian/Ubuntu/Gentoo
+      "/etc/pki/tls/certs/ca-bundle.crt",    # Fedora/RHEL
+      "/etc/ssl/ca-bundle.pem",               # OpenSUSE
+      "/etc/ssl/cert.pem",                    # OpenBSD/macOS (via Homebrew)
+      "/usr/local/etc/openssl/cert.pem",     # macOS (Homebrew OpenSSL)
+      "/etc/ssl/certs",                       # Directory on many systems
+      "/System/Library/OpenSSL/certs",        # macOS system location (directory)
+      "/usr/local/share/certs"                # FreeBSD
+    ]
+
+    # Try file locations first
+    file_result = Enum.find_value(locations, fn path ->
+      if File.exists?(path) and not File.dir?(path) do
+        case Native.config_load_verify_locations_from_file(config.resource, path) do
+          {:ok, _} -> {:ok, config}
+          {:error, _} -> nil
+        end
+      end
+    end)
+
+    case file_result do
+      {:ok, _} = result -> result
+      nil ->
+        # Try directory locations
+        dir_result = Enum.find_value(locations, fn path ->
+          if File.exists?(path) and File.dir?(path) do
+            case Native.config_load_verify_locations_from_directory(config.resource, path) do
+              {:ok, _} -> {:ok, config}
+              {:error, _} -> nil
+            end
+          end
+        end)
+
+        case dir_result do
+          {:ok, _} = result -> result
+          nil -> {:error, "No system CA certificates found"}
+        end
     end
   end
 

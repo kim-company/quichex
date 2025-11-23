@@ -3,9 +3,16 @@ use rustler::ResourceArc;
 use std::sync::{Arc, Mutex};
 
 /// Creates a new QUIC configuration with the specified version
+/// If version is 0, uses quiche::PROTOCOL_VERSION (recommended)
 #[rustler::nif]
 pub fn config_new(version: u32) -> Result<ResourceArc<ConfigResource>, String> {
-    quiche::Config::new(version)
+    let quic_version = if version == 0 {
+        quiche::PROTOCOL_VERSION
+    } else {
+        version
+    };
+
+    quiche::Config::new(quic_version)
         .map(|config| {
             ResourceArc::new(ConfigResource {
                 inner: Arc::new(Mutex::new(config)),
@@ -195,6 +202,21 @@ pub fn config_load_verify_locations_from_file(
 
     cfg.load_verify_locations_from_file(&path)
         .map_err(|e| format!("Failed to load verify locations: {:?}", e))
+}
+
+/// Loads trusted CA certificates from a directory
+#[rustler::nif]
+pub fn config_load_verify_locations_from_directory(
+    config: ResourceArc<ConfigResource>,
+    path: String,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.load_verify_locations_from_directory(&path)
+        .map_err(|e| format!("Failed to load verify locations from directory: {:?}", e))
 }
 
 /// Sets the congestion control algorithm
