@@ -12,8 +12,9 @@ pub struct ConnectionResource {
 }
 
 /// Load resources - called when NIF library is loaded
+#[allow(non_local_definitions)]
 pub fn on_load(env: Env, _load_info: Term) -> bool {
-    rustler::resource!(ConfigResource, env);
-    rustler::resource!(ConnectionResource, env);
+    let _ = rustler::resource!(ConfigResource, env);
+    let _ = rustler::resource!(ConnectionResource, env);
     true
 }
