@@ -255,12 +255,19 @@ defmodule Quichex.Connection do
         }
 
         # Send initial client packets
-        state = send_pending_packets(state)
+        # Errors here (e.g., TLS failures before handshake) are not fatal during init
+        case send_pending_packets(state) do
+          {:ok, state} ->
+            # Schedule first timeout
+            state = schedule_next_timeout(state)
+            {:ok, state}
 
-        # Schedule first timeout
-        state = schedule_next_timeout(state)
-
-        {:ok, state}
+          {:error, _reason} ->
+            # During init, send errors are not fatal - handshake may not be complete yet
+            # Schedule timeout anyway so connection can progress
+            state = schedule_next_timeout(state)
+            {:ok, state}
+        end
 
       {:error, reason} ->
         :gen_udp.close(socket)
@@ -310,18 +317,16 @@ defmodule Quichex.Connection do
     error_code = Keyword.get(opts, :error_code, 0)
     reason = Keyword.get(opts, :reason, "") |> to_charlist()
 
-    case Native.connection_close(state.conn_resource, true, error_code, reason) do
-      {:ok, _} ->
-        # Send final packets
-        state = send_pending_packets(state)
-        {:reply, :ok, %{state | closed: true, established: false}}
-
+    with {:ok, _} <- Native.connection_close(state.conn_resource, true, error_code, reason),
+         {:ok, state} <- send_pending_packets(state) do
+      {:reply, :ok, %{state | closed: true, established: false}}
+    else
       {:error, "Close error: done"} ->
         # Connection already closed or nothing to close - treat as success
         {:reply, :ok, %{state | closed: true, established: false}}
 
       {:error, reason} ->
-        {:reply, {:error, reason}, state}
+        {:stop, {:send_error, reason}, {:error, reason}, state}
     end
   end
 
@@ -367,22 +372,25 @@ defmodule Quichex.Connection do
   end
 
   def handle_call({:stream_send, stream_id, data, fin}, _from, state) do
-    case Native.connection_stream_send(state.conn_resource, stream_id, data, fin) do
-      {:ok, _bytes_written} ->
-        # Update stream state
-        state = if fin do
-          update_in(state.streams[stream_id], fn info ->
-            if info, do: %{info | fin_sent: true}, else: %{type: :unknown, fin_sent: true, fin_received: false}
-          end)
-        else
-          state
-        end
+    with {:ok, _bytes_written} <- Native.connection_stream_send(state.conn_resource, stream_id, data, fin) do
+      # Update stream state
+      state = if fin do
+        update_in(state.streams[stream_id], fn info ->
+          if info, do: %{info | fin_sent: true}, else: %{type: :unknown, fin_sent: true, fin_received: false}
+        end)
+      else
+        state
+      end
 
-        # Send any pending packets
-        state = send_pending_packets(state)
+      # Send any pending packets
+      case send_pending_packets(state) do
+        {:ok, state} ->
+          {:reply, :ok, state}
 
-        {:reply, :ok, state}
-
+        {:error, reason} ->
+          {:stop, {:send_error, reason}, {:error, reason}, state}
+      end
+    else
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
@@ -428,14 +436,12 @@ defmodule Quichex.Connection do
       :both -> "both"
     end
 
-    case Native.connection_stream_shutdown(state.conn_resource, stream_id, direction_str, error_code) do
-      {:ok, _} ->
-        # Send any pending packets
-        state = send_pending_packets(state)
-        {:reply, :ok, state}
-
+    with {:ok, _} <- Native.connection_stream_shutdown(state.conn_resource, stream_id, direction_str, error_code),
+         {:ok, state} <- send_pending_packets(state) do
+      {:reply, :ok, state}
+    else
       {:error, reason} ->
-        {:reply, {:error, reason}, state}
+        {:stop, {:send_error, reason}, {:error, reason}, state}
     end
   end
 
@@ -448,47 +454,49 @@ defmodule Quichex.Connection do
     }
 
     # Process the packet
-    case Native.connection_recv(state.conn_resource, packet, recv_info) do
-      {:ok, _bytes_read} ->
-        # Check if connection is now established
-        state =
-          case Native.connection_is_established(state.conn_resource) do
-            {:ok, true} ->
-              if not state.established do
-                # Connection just became established
-                if state.active and state.controlling_process != self() do
-                  send(state.controlling_process, {:quic_connected, self()})
-                end
+    with {:ok, _bytes_read} <- Native.connection_recv(state.conn_resource, packet, recv_info) do
+      # Check if connection is now established
+      state = case Native.connection_is_established(state.conn_resource) do
+        {:ok, true} ->
+          if not state.established do
+            # Connection just became established
+            if state.active and state.controlling_process != self() do
+              send(state.controlling_process, {:quic_connected, self()})
+            end
 
-                # Reply to all waiters
-                Enum.each(state.waiters, fn from ->
-                  GenServer.reply(from, :ok)
-                end)
+            # Reply to all waiters
+            Enum.each(state.waiters, fn from ->
+              GenServer.reply(from, :ok)
+            end)
 
-                %{state | established: true, waiters: []}
-              else
-                state
-              end
-
-            _ ->
-              state
+            %{state | established: true, waiters: []}
+          else
+            state
           end
 
-        # Check for readable streams and process them (active mode)
-        state = if state.active do
-          process_readable_streams(state)
-        else
+        _ ->
           state
-        end
+      end
 
-        # Send any packets generated in response
-        state = send_pending_packets(state)
+      # Check for readable streams and process them (active mode)
+      state = if state.active do
+        process_readable_streams(state)
+      else
+        state
+      end
 
-        # Reschedule timeout
-        state = schedule_next_timeout(state)
+      # Send any packets generated in response
+      case send_pending_packets(state) do
+        {:ok, state} ->
+          # Reschedule timeout
+          state = schedule_next_timeout(state)
+          {:noreply, state}
 
-        {:noreply, state}
-
+        {:error, reason} ->
+          Logger.error("Connection send error: #{inspect(reason)}")
+          {:stop, {:send_error, reason}, state}
+      end
+    else
       {:error, "done"} ->
         # No more data to process (not an error)
         {:noreply, state}
@@ -501,16 +509,13 @@ defmodule Quichex.Connection do
 
   def handle_info(:quic_timeout, state) do
     # Handle QUIC timeout event
-    case Native.connection_on_timeout(state.conn_resource) do
-      {:ok, _} ->
-        # Send any packets generated by timeout handling
-        state = send_pending_packets(state)
-
-        # Schedule next timeout
-        state = schedule_next_timeout(state)
-
-        {:noreply, state}
-
+    with {:ok, _} <- Native.connection_on_timeout(state.conn_resource),
+         # Send any packets generated by timeout handling
+         {:ok, state} <- send_pending_packets(state) do
+      # Schedule next timeout
+      state = schedule_next_timeout(state)
+      {:noreply, state}
+    else
       {:error, reason} ->
         Logger.error("Timeout handling error: #{inspect(reason)}")
         {:stop, {:timeout_error, reason}, state}
@@ -567,11 +572,11 @@ defmodule Quichex.Connection do
 
       {:error, "done"} ->
         # No more packets to send
-        state
+        {:ok, state}
 
       {:error, reason} ->
-        Logger.warning("Failed to send packet: #{inspect(reason)}")
-        state
+        # Fatal error - connection cannot send packets
+        {:error, reason}
     end
   end
 
