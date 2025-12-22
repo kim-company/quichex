@@ -192,7 +192,7 @@ pub fn connection_close(
     conn: ResourceArc<ConnectionResource>,
     app: bool,
     err: u64,
-    reason: Vec<u8>,
+    reason: Binary,
 ) -> Result<(), String> {
     let mut connection = conn
         .inner
@@ -200,7 +200,7 @@ pub fn connection_close(
         .map_err(|e| format!("Lock error: {}", e))?;
 
     connection
-        .close(app, err, &reason)
+        .close(app, err, reason.as_slice())
         .map_err(|e| format!("Close error: {}", quiche_error_to_string(e)))
 }
 
@@ -217,53 +217,81 @@ pub fn connection_trace_id(conn: ResourceArc<ConnectionResource>) -> Result<Stri
 
 /// Gets the source connection ID
 #[rustler::nif]
-pub fn connection_source_id(conn: ResourceArc<ConnectionResource>) -> Result<Vec<u8>, String> {
+pub fn connection_source_id<'a>(
+    env: rustler::Env<'a>,
+    conn: ResourceArc<ConnectionResource>,
+) -> Result<rustler::Binary<'a>, String> {
     let connection = conn
         .inner
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?;
 
-    Ok(connection.source_id().into_owned().to_vec())
+    let id = connection.source_id().into_owned();
+    let mut binary = rustler::OwnedBinary::new(id.len())
+        .ok_or_else(|| "Failed to allocate binary".to_string())?;
+    binary.as_mut_slice().copy_from_slice(&id);
+
+    Ok(binary.release(env))
 }
 
 /// Gets the destination connection ID
 #[rustler::nif]
-pub fn connection_destination_id(
+pub fn connection_destination_id<'a>(
+    env: rustler::Env<'a>,
     conn: ResourceArc<ConnectionResource>,
-) -> Result<Vec<u8>, String> {
+) -> Result<rustler::Binary<'a>, String> {
     let connection = conn
         .inner
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?;
 
-    Ok(connection.destination_id().into_owned().to_vec())
+    let id = connection.destination_id().into_owned();
+    let mut binary = rustler::OwnedBinary::new(id.len())
+        .ok_or_else(|| "Failed to allocate binary".to_string())?;
+    binary.as_mut_slice().copy_from_slice(&id);
+
+    Ok(binary.release(env))
 }
 
 /// Gets the negotiated application protocol (ALPN)
 #[rustler::nif]
-pub fn connection_application_proto(
+pub fn connection_application_proto<'a>(
+    env: rustler::Env<'a>,
     conn: ResourceArc<ConnectionResource>,
-) -> Result<Vec<u8>, String> {
+) -> Result<rustler::Binary<'a>, String> {
     let connection = conn
         .inner
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?;
 
-    Ok(connection.application_proto().to_vec())
+    let proto = connection.application_proto();
+    let mut binary = rustler::OwnedBinary::new(proto.len())
+        .ok_or_else(|| "Failed to allocate binary".to_string())?;
+    binary.as_mut_slice().copy_from_slice(proto);
+
+    Ok(binary.release(env))
 }
 
 /// Gets the peer's certificate chain (DER encoded)
 #[rustler::nif]
-pub fn connection_peer_cert(
+pub fn connection_peer_cert<'a>(
+    env: rustler::Env<'a>,
     conn: ResourceArc<ConnectionResource>,
-) -> Result<Option<Vec<Vec<u8>>>, String> {
+) -> Result<Option<Vec<rustler::Binary<'a>>>, String> {
     let connection = conn
         .inner
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?;
 
-    // quiche returns Vec<u8> for peer_cert, just wrap in Option<Vec<Vec<u8>>>
-    Ok(connection.peer_cert().map(|cert| vec![cert.to_vec()]))
+    match connection.peer_cert() {
+        Some(cert) => {
+            let mut binary = rustler::OwnedBinary::new(cert.len())
+                .ok_or_else(|| "Failed to allocate binary".to_string())?;
+            binary.as_mut_slice().copy_from_slice(cert);
+            Ok(Some(vec![binary.release(env)]))
+        }
+        None => Ok(None),
+    }
 }
 
 /// Checks if the connection is in early data (0-RTT) state

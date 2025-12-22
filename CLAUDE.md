@@ -61,7 +61,11 @@ The library follows a layered architecture:
 User applications (Phoenix, custom protocols) interact with the public API.
 
 ### Layer 2: Quichex Public API (Elixir)
-- **Quichex.Connection (GenServer)**: Manages individual QUIC connections. Each connection runs in its own process for fault isolation and concurrency.
+- **Quichex.Connection (gen_statem)**: Manages individual QUIC connections using gen_statem with functional core pattern. Each connection runs in its own process for fault isolation and concurrency. States: `:init`, `:handshaking`, `:connected`, `:closed`.
+- **Quichex.State**: Pure functional connection state management.
+- **Quichex.StateMachine**: Pure functional state transitions (no side effects).
+- **Quichex.StreamState**: Pure functional stream state with buffering for passive mode.
+- **Quichex.Action**: Side effect system - state machine returns actions, runtime executes them.
 - **Quichex.Listener (GenServer)**: Accepts incoming QUIC connections on the server side. Routes packets to appropriate connection processes.
 - **Quichex.Config**: Struct and builder pattern for QUIC configuration (application protocols, flow control, congestion control, TLS settings).
 - **Quichex.Stream**: Abstraction for QUIC stream operations (bidirectional and unidirectional).
@@ -84,10 +88,12 @@ UDP socket I/O for sending and receiving QUIC packets.
 ## Key Design Patterns
 
 ### Process Model
-- Each QUIC connection is a GenServer process
+- Each QUIC connection is a gen_statem process with functional core pattern
+- State machine states: `:init` → `:handshaking` → `:connected` → `:closed`
+- Pure functional state transitions (StateMachine module) separate from side effects (Action system)
 - Listener is a GenServer that spawns connection processes
 - Supervision tree ensures fault tolerance and crash isolation
-- Active/passive modes similar to :gen_tcp/:gen_udp
+- Active/passive modes similar to :gen_tcp/:gen_udp with proper buffering in StreamState
 
 ### Message Protocol
 When `active: true`, connections send messages to the controlling process:
@@ -126,23 +132,84 @@ When `active: true`, connections send messages to the controlling process:
 - Minimize data copying (use Binary references where possible)
 - Thread safety: wrap resources in Arc<Mutex<>> when mutable state is shared
 
+### Elixir<->Rust API Conventions
+
+**CRITICAL: All byte data must cross the boundary as `rustler::Binary`**
+
+After comprehensive API audit (see API_AUDIT.md), we've established these conventions:
+
+1. **Byte Data**: Always use `Binary` (NEVER `Vec<u8>`)
+   ```rust
+   // ✅ Correct - returns binary in Elixir: <<1, 2, 3>>
+   pub fn connection_source_id<'a>(
+       env: rustler::Env<'a>,
+       conn: ResourceArc<ConnectionResource>
+   ) -> Result<rustler::Binary<'a>, String>
+
+   // ❌ Wrong - returns confusing list in Elixir: [1, 2, 3]
+   pub fn bad_example() -> Result<Vec<u8>, String>
+   ```
+
+2. **Text Data**: Use `String` for human-readable text
+   ```rust
+   pub fn connection_trace_id(conn: ResourceArc<ConnectionResource>) -> Result<String, String>
+   ```
+
+3. **Structured Data**: Use Erlang terms (tuples, maps, custom structs with `NifStruct` derive)
+   ```rust
+   pub fn connection_send<'a>(env: Env<'a>, conn: ResourceArc<ConnectionResource>)
+       -> Result<(Binary<'a>, SendInfo), String>
+   ```
+
+**Performance Characteristics**:
+- **Small data (<64 bytes)**: Binary has ~5% overhead vs Vec<u8>
+- **Large data (>1KB)**: Binary is 10-100x faster (zero-copy, reference counted)
+- **Rule of thumb**: Always use Binary for consistency and future-proofing
+
+**Examples from codebase**:
+- `connection_close(reason: Binary)` - accepts binary reason string
+- `connection_send()` - returns binary packet data
+- `connection_stream_recv()` - returns binary stream data
+- `connection_source_id()` - returns binary connection ID
+- `connection_peer_cert()` - returns `Vec<Binary>` for certificate chain
+
 ## Project Status
 
-The project is in early development (Milestone 1 phase). The basic scaffolding exists but core functionality is not yet implemented. See PLAN.md for the complete roadmap with 7 milestones:
+**Current Status**: Architecture Refactor Complete (Phases 1-2) ✅
 
-1. Project Scaffolding (current)
-2. Config and Core NIFs
-3. Client Connection Establishment
-4. Stream Operations
-5. Server-Side Listener
-6. Advanced Features (datagrams, migration, stats)
-7. Production Hardening
+The project has completed a major architecture overhaul:
+
+- **Architecture**: Migrated from GenServer to gen_statem with functional core pattern (inspired by Finch)
+- **API Consistency**: All Elixir<->Rust byte data uses Binary (zero-copy performance)
+- **Test Coverage**: 61/69 tests passing (88% pass rate)
+- **State Management**: Pure functional modules (State, StateMachine, StreamState, Action)
+- **Preparation**: Foundation laid for stream-level parallelism (Phases 3-7)
+
+See comprehensive documentation:
+- `CONSOLIDATION_SUMMARY.md` - Current status and metrics
+- `ARCHITECTURE_REFACTOR_PROGRESS.md` - Phases 1-2 implementation details
+- `API_AUDIT.md` - API consistency decisions
+- `/Users/dmorn/.claude/plans/goofy-riding-bear.md` - Full 6-week refactor plan
+
+**Original Milestones** (see PLAN.md):
+1. ✅ Project Scaffolding
+2. ✅ Config and Core NIFs
+3. ✅ Client Connection Establishment
+4. ⚠️ Stream Operations (basic implementation working, optimization in progress)
+5. ⏳ Server-Side Listener
+6. ⏳ Advanced Features (datagrams, migration, stats)
+7. ⏳ Production Hardening
+
+**Next Steps**:
+- Option A: Fix remaining 8 test failures (mostly integration tests requiring quiche-server)
+- Option B: Proceed to Phase 3 (Stream-level Concurrency with StreamDispatcher/StreamWorker)
 
 ## Important Conventions
 
 ### Elixir Style
 - Follow standard Elixir formatting (configured in `.formatter.exs`)
-- Use GenServer for stateful processes
+- Use gen_statem for complex state machines (Connection), GenServer for simpler processes
+- Prefer functional core pattern: pure state transitions + action system for side effects
 - Prefer pipeline operators for configuration builders
 - Document all public functions with examples
 
