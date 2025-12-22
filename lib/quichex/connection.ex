@@ -224,10 +224,21 @@ defmodule Quichex.Connection do
     scid = :crypto.strong_rand_bytes(16)
 
     # Get the parent process (the one that called connect/1)
-    parent_pid = case Process.get(:"$callers") do
-      [caller | _] -> caller
-      _ -> self()
+    # Use the process that's linked to us (GenServer.start_link creates a link)
+    parent_pid = case Process.info(self(), :links) do
+      {:links, [parent | _]} when is_pid(parent) ->
+        parent
+      _ ->
+        # Fallback: try $callers
+        case Process.get(:"$callers") do
+          [caller | _] -> caller
+          _ ->
+            # Last resort: use the group leader (usually the calling process)
+            Process.group_leader()
+        end
     end
+
+    Logger.debug("Connection init: self=#{inspect(self())}, controlling_process=#{inspect(parent_pid)}")
 
     # Create QUIC connection
     #Convert address tuples to format Rustler can decode
@@ -613,9 +624,14 @@ defmodule Quichex.Connection do
     # Read all available data from the stream
     case Native.connection_stream_recv(state.conn_resource, stream_id, 65535) do
       {:ok, {data, fin}} ->
+        Logger.debug("process_stream_data: stream=#{stream_id}, data=#{byte_size(data)} bytes, fin=#{fin}, controlling_process=#{inspect(state.controlling_process)}, self=#{inspect(self())}")
+
         # Send message to controlling process (only if it's not ourselves)
         if byte_size(data) > 0 and state.controlling_process != self() do
+          Logger.debug("Sending :quic_stream to #{inspect(state.controlling_process)}")
           send(state.controlling_process, {:quic_stream, self(), stream_id, data})
+        else
+          Logger.warning("NOT sending :quic_stream - size=#{byte_size(data)}, same_process?=#{state.controlling_process == self()}")
         end
 
         if fin do

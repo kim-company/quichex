@@ -95,19 +95,36 @@ pub fn connection_recv(
     // Need to copy packet data to mutable buffer for quiche
     let mut buf = packet.as_slice().to_vec();
 
-    connection
-        .recv(&mut buf, info)
-        .map_err(|e| match e {
-            quiche::Error::Done => "done".to_string(),
-            _ => format!("Recv error: {}", quiche_error_to_string(e)),
-        })
+    eprintln!("[RUST] connection_recv: processing {} bytes", buf.len());
+
+    match connection.recv(&mut buf, info) {
+        Ok(bytes_read) => {
+            eprintln!("[RUST] connection_recv: processed {} bytes", bytes_read);
+            eprintln!("[RUST]   is_established={}", connection.is_established());
+
+            // Log readable streams after processing packet
+            let readable: Vec<u64> = connection.readable().collect();
+            eprintln!("[RUST]   readable_streams={:?}", readable);
+
+            Ok(bytes_read)
+        },
+        Err(quiche::Error::Done) => {
+            eprintln!("[RUST] connection_recv: Done");
+            Err("done".to_string())
+        },
+        Err(e) => {
+            eprintln!("[RUST] connection_recv: Error {:?}", e);
+            Err(format!("Recv error: {}", quiche_error_to_string(e)))
+        }
+    }
 }
 
 /// Generates a QUIC packet to send
 #[rustler::nif]
-pub fn connection_send(
+pub fn connection_send<'a>(
+    env: rustler::Env<'a>,
     conn: ResourceArc<ConnectionResource>,
-) -> Result<(Vec<u8>, SendInfo), String> {
+) -> Result<(rustler::Binary<'a>, SendInfo), String> {
     let mut connection = conn
         .inner
         .lock()
@@ -117,9 +134,12 @@ pub fn connection_send(
 
     match connection.send(&mut out) {
         Ok((written, send_info)) => {
-            // Return only the written portion
-            out.truncate(written);
-            Ok((out, SendInfo::from_quiche(send_info)))
+            // Create a Binary from the written portion
+            let mut binary = rustler::OwnedBinary::new(written)
+                .ok_or_else(|| "Failed to allocate binary".to_string())?;
+            binary.as_mut_slice().copy_from_slice(&out[..written]);
+
+            Ok((binary.release(env), SendInfo::from_quiche(send_info)))
         }
         Err(quiche::Error::Done) => Err("done".to_string()),
         Err(e) => Err(format!("Send error: {}", quiche_error_to_string(e))),
@@ -293,11 +313,12 @@ pub fn connection_stream_send(
 
 /// Receives data from a stream
 #[rustler::nif]
-pub fn connection_stream_recv(
+pub fn connection_stream_recv<'a>(
+    env: rustler::Env<'a>,
     conn: ResourceArc<ConnectionResource>,
     stream_id: u64,
     max_len: usize,
-) -> Result<(Vec<u8>, bool), String> {
+) -> Result<(rustler::Binary<'a>, bool), String> {
     let mut connection = conn
         .inner
         .lock()
@@ -305,12 +326,22 @@ pub fn connection_stream_recv(
 
     let mut buf = vec![0u8; max_len];
 
+    eprintln!("[RUST] connection_stream_recv: stream_id={}, max_len={}", stream_id, max_len);
+
     match connection.stream_recv(stream_id, &mut buf) {
         Ok((read, fin)) => {
-            buf.truncate(read);
-            Ok((buf, fin))
+            eprintln!("[RUST]   Read {} bytes, FIN={}", read, fin);
+            // Create a Binary from the read portion
+            let mut binary = rustler::OwnedBinary::new(read)
+                .ok_or_else(|| "Failed to allocate binary".to_string())?;
+            binary.as_mut_slice().copy_from_slice(&buf[..read]);
+
+            Ok((binary.release(env), fin))
         }
-        Err(e) => Err(format!("Stream recv error: {}", quiche_error_to_string(e))),
+        Err(e) => {
+            eprintln!("[RUST]   Error: {:?}", e);
+            Err(format!("Stream recv error: {}", quiche_error_to_string(e)))
+        }
     }
 }
 
@@ -325,6 +356,7 @@ pub fn connection_readable_streams(
         .map_err(|e| format!("Lock error: {}", e))?;
 
     let streams: Vec<u64> = connection.readable().collect();
+    eprintln!("[RUST] connection_readable_streams: {:?}", streams);
     Ok(streams)
 }
 
