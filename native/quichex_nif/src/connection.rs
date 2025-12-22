@@ -95,28 +95,12 @@ pub fn connection_recv(
     // Need to copy packet data to mutable buffer for quiche
     let mut buf = packet.as_slice().to_vec();
 
-    eprintln!("[RUST] connection_recv: processing {} bytes", buf.len());
-
-    match connection.recv(&mut buf, info) {
-        Ok(bytes_read) => {
-            eprintln!("[RUST] connection_recv: processed {} bytes", bytes_read);
-            eprintln!("[RUST]   is_established={}", connection.is_established());
-
-            // Log readable streams after processing packet
-            let readable: Vec<u64> = connection.readable().collect();
-            eprintln!("[RUST]   readable_streams={:?}", readable);
-
-            Ok(bytes_read)
-        },
-        Err(quiche::Error::Done) => {
-            eprintln!("[RUST] connection_recv: Done");
-            Err("done".to_string())
-        },
-        Err(e) => {
-            eprintln!("[RUST] connection_recv: Error {:?}", e);
-            Err(format!("Recv error: {}", quiche_error_to_string(e)))
-        }
-    }
+    connection
+        .recv(&mut buf, info)
+        .map_err(|e| match e {
+            quiche::Error::Done => "done".to_string(),
+            _ => format!("Recv error: {}", quiche_error_to_string(e)),
+        })
 }
 
 /// Generates a QUIC packet to send
@@ -326,11 +310,8 @@ pub fn connection_stream_recv<'a>(
 
     let mut buf = vec![0u8; max_len];
 
-    eprintln!("[RUST] connection_stream_recv: stream_id={}, max_len={}", stream_id, max_len);
-
     match connection.stream_recv(stream_id, &mut buf) {
         Ok((read, fin)) => {
-            eprintln!("[RUST]   Read {} bytes, FIN={}", read, fin);
             // Create a Binary from the read portion
             let mut binary = rustler::OwnedBinary::new(read)
                 .ok_or_else(|| "Failed to allocate binary".to_string())?;
@@ -339,7 +320,6 @@ pub fn connection_stream_recv<'a>(
             Ok((binary.release(env), fin))
         }
         Err(e) => {
-            eprintln!("[RUST]   Error: {:?}", e);
             Err(format!("Stream recv error: {}", quiche_error_to_string(e)))
         }
     }
@@ -356,7 +336,6 @@ pub fn connection_readable_streams(
         .map_err(|e| format!("Lock error: {}", e))?;
 
     let streams: Vec<u64> = connection.readable().collect();
-    eprintln!("[RUST] connection_readable_streams: {:?}", streams);
     Ok(streams)
 }
 

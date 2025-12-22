@@ -238,8 +238,6 @@ defmodule Quichex.Connection do
         end
     end
 
-    Logger.debug("Connection init: self=#{inspect(self())}, controlling_process=#{inspect(parent_pid)}")
-
     # Create QUIC connection
     #Convert address tuples to format Rustler can decode
     local_addr_arg = format_address(local_addr)
@@ -471,6 +469,8 @@ defmodule Quichex.Connection do
         {:ok, true} ->
           if not state.established do
             # Connection just became established
+            Logger.debug("Connection established")
+
             if state.active and state.controlling_process != self() do
               send(state.controlling_process, {:quic_connected, self()})
             end
@@ -624,14 +624,11 @@ defmodule Quichex.Connection do
     # Read all available data from the stream
     case Native.connection_stream_recv(state.conn_resource, stream_id, 65535) do
       {:ok, {data, fin}} ->
-        Logger.debug("process_stream_data: stream=#{stream_id}, data=#{byte_size(data)} bytes, fin=#{fin}, controlling_process=#{inspect(state.controlling_process)}, self=#{inspect(self())}")
+        Logger.debug("Stream #{stream_id}: received #{byte_size(data)} bytes, fin=#{fin}")
 
         # Send message to controlling process (only if it's not ourselves)
         if byte_size(data) > 0 and state.controlling_process != self() do
-          Logger.debug("Sending :quic_stream to #{inspect(state.controlling_process)}")
           send(state.controlling_process, {:quic_stream, self(), stream_id, data})
-        else
-          Logger.warning("NOT sending :quic_stream - size=#{byte_size(data)}, same_process?=#{state.controlling_process == self()}")
         end
 
         if fin do

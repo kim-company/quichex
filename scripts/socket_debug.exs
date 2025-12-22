@@ -93,7 +93,7 @@ defmodule Quichex.Connection.Debug do
             {:ok, state}
 
           {:error, reason} ->
-            Logger.warn("Initial send error (may be ok): #{inspect(reason)}")
+            Logger.warning("Initial send error (may be ok): #{inspect(reason)}")
             {:ok, state}
         end
 
@@ -158,7 +158,7 @@ defmodule Quichex.Connection.Debug do
     Logger.info("  Calling connection_recv...")
 
     # Process the packet
-    case Native.connection_recv(state.conn_resource, packet, recv_info) do
+    state = case Native.connection_recv(state.conn_resource, packet, recv_info) do
       {:ok, bytes_read} ->
         Logger.info("  ✓ connection_recv succeeded: #{bytes_read} bytes processed")
 
@@ -167,7 +167,7 @@ defmodule Quichex.Connection.Debug do
         case Native.connection_is_established(state.conn_resource) do
           {:ok, true} ->
             Logger.info("  ✓✓✓ CONNECTION IS ESTABLISHED! ✓✓✓")
-            state = %{state | established: true}
+            %{state | established: true}
 
           {:ok, false} ->
             Logger.info("  Connection not yet established")
@@ -180,11 +180,11 @@ defmodule Quichex.Connection.Debug do
 
       {:error, "done"} ->
         Logger.info("  connection_recv returned 'done' (no more data in packet)")
-        {:noreply, state}
+        state
 
       {:error, reason} ->
         Logger.error("  ✗ connection_recv error: #{inspect(reason)}")
-        {:noreply, state}
+        state
     end
 
     # Check for readable streams
