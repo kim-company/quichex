@@ -289,6 +289,17 @@ defmodule Quichex.Connection do
     end
   end
 
+  def handshaking(:info, :quic_timeout, data) do
+    # Handle timeout during handshake
+    new_data = StateMachine.handle_timeout(data)
+    {actions, new_data} = State.take_actions(new_data)
+
+    # Execute actions
+    execute_actions(actions, new_data)
+
+    {:keep_state, new_data}
+  end
+
   def handshaking({:call, from}, :wait_connected, data) do
     # Add to waiters list (will be replied to when established)
     new_data = State.add_waiter(data, from)

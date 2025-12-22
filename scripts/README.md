@@ -1,84 +1,111 @@
-# Manual Test Scripts
+# Example Scripts
 
-This directory contains manual test scripts that are **not** part of the ExUnit test suite. These scripts are used for interactive testing, debugging, and integration testing with external QUIC servers.
+This directory contains example scripts demonstrating how to use Quichex.
 
 ## Scripts
 
-### manual_server_test.exs
-Full integration test against quiche-server. Tests connection establishment, stream operations, and data transfer.
+### example.exs
+
+A complete example showing how to:
+- Connect to a local QUIC server (quiche-server)
+- Perform the QUIC handshake
+- Open a bidirectional stream
+- Send an HTTP/0.9 request (hq-interop protocol)
+- Receive and display the response
+
+**Prerequisites**:
+
+1. Build quiche-server (one-time setup):
+   ```bash
+   cd ../quiche
+   cargo build --examples
+   ```
+
+2. Create content directory with test file (one-time setup):
+   ```bash
+   mkdir -p ../quiche/quiche/examples/root
+   echo '<!DOCTYPE html><html><body><h1>Hello from Quiche!</h1></body></html>' > ../quiche/quiche/examples/root/index.html
+   ```
+
+3. Start quiche-server in a separate terminal:
+   ```bash
+   cd ../quiche/quiche
+   RUST_LOG=info ../../target/debug/examples/server
+   ```
+
+   Note: The server listens on `127.0.0.1:4433` and serves files from `examples/root/`
 
 **Usage**:
 ```bash
-# Start quiche-server first
-cd ../quiche && RUST_LOG=debug target/debug/quiche-server \
-  --cert ../quichex/priv/cert.crt \
-  --key ../quichex/priv/cert.key \
-  --listen 127.0.0.1:4433 --no-retry
-
-# Run the test
-mix run scripts/manual_server_test.exs
+mix run scripts/example.exs
 ```
 
-**Expected output**: Connection established, stream data sent and received, test passes.
+**Expected output** (when quiche-server is running):
+```
+=== Quichex Example: Local quiche-server ===
 
-### socket_debug.exs
-Detailed socket-level debugging with extensive logging. Shows UDP packet flow, connection state changes, and stream operations.
+1. Connecting to 127.0.0.1:4433...
+   (Make sure quiche-server is running!)
+   ✓ Connection process started
 
-**Usage**:
+2. Waiting for QUIC handshake to complete...
+   ✓ Handshake complete!
+
+Connection details:
+  - Server: 127.0.0.1
+  - Local:  {{0, 0, 0, 0}, 54321}
+  - Remote: {{127, 0, 0, 1}, 4433}
+  - Established: true
+
+3. Opening bidirectional stream...
+   ✓ Stream 0 opened
+
+4. Sending HTTP/0.9 GET request...
+   ✓ Request sent (18 bytes)
+
+5. Waiting for response...
+   (Active mode: messages sent automatically)
+
+   ✓ Received response!
+   Response (123 bytes):
+   <!DOCTYPE html>
+   <html>
+   <head><title>quiche</title></head>
+   <body>Hello from quiche!</body>
+   </html>
+
+   ✓ Stream FIN received
+
+6. Closing connection...
+   ✓ Connection closed
+
+=== Example Complete ===
+```
+
+## Purpose
+
+This script serves as:
+- **Getting started guide** for new users
+- **Integration test** against a real QUIC server
+- **Reference implementation** showing best practices
+- **Debugging aid** when troubleshooting connection issues
+
+## Testing Against Public Servers
+
+The integration tests (run with `mix test --only integration`) connect to **cloudflare-quic.com** and verify:
+- Connection establishment
+- Stream operations
+- Data transfer
+- Multiple concurrent streams
+
+To run these tests:
 ```bash
-# Start quiche-server
-cd ../quiche && RUST_LOG=trace target/debug/quiche-server \
-  --cert ../quichex/priv/cert.crt \
-  --key ../quichex/priv/cert.key \
-  --listen 127.0.0.1:4433 --no-retry
-
-# Run the debug script
-mix run scripts/socket_debug.exs
+mix test --only integration
 ```
-
-**Purpose**:
-- Diagnose socket message delivery issues
-- Verify UDP packet reception
-- Debug connection establishment problems
-- Inspect stream data flow
-
-**Output**: Verbose logs showing every UDP message, connection state transition, and stream event.
-
-### debug_test.exs
-Simple message flow debugging test. Lighter weight than socket_debug.exs.
-
-**Usage**:
-```bash
-# Start quiche-server
-cd ../quiche && target/debug/quiche-server \
-  --cert ../quichex/priv/cert.crt \
-  --key ../quichex/priv/cert.key \
-  --listen 127.0.0.1:4433 --no-retry
-
-# Run the test
-mix run scripts/debug_test.exs
-```
-
-## Why These Are Not ExUnit Tests
-
-These scripts:
-- Require external services (quiche-server) to be running
-- Are interactive and may require manual intervention
-- Are primarily for debugging, not for automated CI/CD
-- Have variable output depending on server configuration
-- May take longer to execute than typical unit tests
-
-The main ExUnit test suite is in `test/` and can run without external dependencies.
-
-## When to Use These Scripts
-
-- **Development**: When adding new features or fixing bugs related to connection or stream handling
-- **Debugging**: When investigating issues with packet flow, socket handling, or protocol state
-- **Integration Testing**: When testing against different QUIC server implementations
-- **Performance Testing**: When measuring latency or throughput characteristics
 
 ## See Also
 
-- `TESTING.md` - Comprehensive guide to testing Quichex
-- `BUGS_FIXED.md` - Documentation of bugs discovered using these scripts
-- `CLEANUP_COMPLETE.md` - Cleanup performed after debugging session
+- `test/quichex/integration_test.exs` - Comprehensive integration tests
+- `test/quichex/connection_test.exs` - Unit tests for Connection API
+- `CLAUDE.md` - Development guide and conventions
+- `CONSOLIDATION_SUMMARY.md` - Current project status
