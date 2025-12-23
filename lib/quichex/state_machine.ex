@@ -332,8 +332,13 @@ defmodule Quichex.StateMachine do
     end
   end
 
-  @doc false
-  defp generate_pending_packets(%State{} = state) do
+  @doc """
+  Generates pending QUIC packets that need to be sent.
+
+  Calls the connection_send NIF repeatedly until all pending packets are collected,
+  then adds a {:send_packets, packets} action to the state.
+  """
+  def generate_pending_packets(%State{} = state) do
     collect_packets_recursive(state, [])
   end
 

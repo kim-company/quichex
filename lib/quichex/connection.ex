@@ -392,6 +392,25 @@ defmodule Quichex.Connection do
     {:keep_state, new_data}
   end
 
+  def connected(:info, {:stream_worker_sent, stream_id, bytes_written}, data) do
+    # StreamWorker notified us that it wrote data
+    # Update stream state and generate packets
+    {stream, new_data} = State.get_or_create_stream(data, stream_id, :bidirectional)
+
+    stream = Quichex.StreamState.add_bytes_sent(stream, bytes_written)
+
+    new_data =
+      new_data
+      |> State.update_stream(stream)
+      |> StateMachine.generate_pending_packets()
+
+    # Execute actions (packet sends)
+    {actions, new_data} = State.take_actions(new_data)
+    execute_actions(actions, new_data)
+
+    {:keep_state, new_data}
+  end
+
   def connected({:call, from}, :wait_connected, _data) do
     {:keep_state_and_data, [{:reply, from, :ok}]}
   end
@@ -410,7 +429,8 @@ defmodule Quichex.Connection do
   end
 
   def connected({:call, from}, {:stream_send, stream_id, data_bytes, fin}, data) do
-    case StateMachine.stream_send(data, stream_id, data_bytes, fin) do
+    # Use StreamDispatcher for concurrent stream operations
+    case Quichex.StreamDispatcher.send(data, stream_id, data_bytes, fin) do
       {:ok, new_data} ->
         {actions, new_data} = State.take_actions(new_data)
         execute_actions(actions, new_data)
@@ -422,7 +442,8 @@ defmodule Quichex.Connection do
   end
 
   def connected({:call, from}, {:stream_recv, stream_id, max_len}, data) do
-    {result, new_data} = StateMachine.stream_recv(data, stream_id, max_len)
+    # Use StreamDispatcher for consistent stream handling
+    {result, new_data} = Quichex.StreamDispatcher.recv(data, stream_id, max_len)
     {:keep_state, new_data, [{:reply, from, result}]}
   end
 
