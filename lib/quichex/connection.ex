@@ -194,12 +194,186 @@ defmodule Quichex.Connection do
   end
 
   @doc """
-  Sets socket options (like setopts for gen_tcp).
+  Sets socket options dynamically (similar to `:gen_tcp.setopts/2`).
+
+  This function allows you to change connection behavior at runtime, most commonly
+  to control message delivery mode for flow control and backpressure management.
 
   ## Options
 
-    * `:active` - Active mode: `true`, `false`, `:once`, or positive integer
+    * `:active` - Controls message delivery mode:
+      - `true` - Messages delivered automatically to controlling process (default)
+      - `false` - Passive mode, use `stream_recv/3` to explicitly read data
+      - `:once` - Deliver one message then automatically switch to passive
+      - `{:active, N}` - Deliver N messages then automatically switch to passive (N > 0)
 
+  ## Message Delivery Guarantees
+
+  ### Switching from **Passive to Active** (`false` → `true`/`:once`/N):
+
+  - **Buffered data is NOT automatically delivered**
+  - Only **new incoming data** after the switch triggers message delivery
+  - To drain buffered data, call `stream_recv/3` before switching modes
+  - This behavior matches `:gen_tcp` for compatibility
+
+  ### Switching from **Active to Passive** (`true`/`:once`/N → `false`):
+
+  - **Messages already sent to mailbox are not revoked**
+  - **New data arriving after switch** is buffered instead of delivered
+  - No message loss during the transition
+  - Mode switch takes effect immediately for new data
+
+  ### Active Count Behavior:
+
+  - Count is **per-message**, not per-stream (global to connection)
+  - Each message (`{:quic_stream, ...}`, `{:quic_stream_fin, ...}`) decrements count
+  - When count reaches 0, mode automatically switches to `false` (passive)
+  - Connection notifications (`{:quic_connected, ...}`) also count toward limit
+
+  ## Examples
+
+  ### Active Mode (Default) - Automatic Delivery
+
+      {:ok, conn} = Connection.connect(
+        host: "example.com",
+        port: 443,
+        config: config,
+        active: true  # default
+      )
+
+      # Receive connection notification
+      receive do
+        {:quic_connected, ^conn} -> :ok
+      end
+
+      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
+      Connection.stream_send(conn, stream_id, "GET / HTTP/1.1\\r\\n\\r\\n", fin: true)
+
+      # Messages delivered automatically
+      receive do
+        {:quic_stream, ^conn, ^stream_id, data} ->
+          IO.puts("Received: \#{byte_size(data)} bytes")
+
+        {:quic_stream_fin, ^conn, ^stream_id} ->
+          IO.puts("Stream finished")
+      end
+
+  ### Passive Mode - Explicit Reading
+
+      {:ok, conn} = Connection.connect(
+        host: "example.com",
+        port: 443,
+        config: config,
+        active: false
+      )
+
+      # Wait for connection (no automatic notification)
+      :ok = Connection.wait_connected(conn, timeout: 5_000)
+
+      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
+      Connection.stream_send(conn, stream_id, "GET / HTTP/1.1\\r\\n\\r\\n", fin: true)
+
+      # Must explicitly read data
+      {:ok, data, fin?} = Connection.stream_recv(conn, stream_id)
+      IO.puts("Read \#{byte_size(data)} bytes, FIN=\#{fin?}")
+
+  ### :once Mode - Manual Flow Control
+
+      {:ok, conn} = Connection.connect(
+        host: "example.com",
+        port: 443,
+        config: config,
+        active: :once
+      )
+
+      # Get one message
+      receive do
+        {:quic_connected, ^conn} -> :ok
+      end
+
+      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
+      Connection.stream_send(conn, stream_id, "GET / HTTP/1.1\\r\\n\\r\\n", fin: true)
+
+      # Receive one stream message, then automatically passive
+      receive do
+        {:quic_stream, ^conn, ^stream_id, data} ->
+          process_data(data)
+          # Re-enable to get next message
+          Connection.setopts(conn, active: :once)
+      end
+
+  ### Integer Mode - Batch Flow Control
+
+      {:ok, conn} = Connection.connect(
+        host: "example.com",
+        port: 443,
+        config: config,
+        active: 5  # Receive 5 messages then pause
+      )
+
+      # Will receive up to 5 messages (connection + stream data)
+      Enum.each(1..5, fn _ ->
+        receive do
+          {:quic_connected, ^conn} -> :ok
+          {:quic_stream, ^conn, stream_id, data} -> process(stream_id, data)
+          {:quic_stream_fin, ^conn, stream_id} -> finish(stream_id)
+        after
+          5_000 -> :timeout
+        end
+      end)
+
+      # Now passive - must use setopts to re-enable
+      Connection.setopts(conn, active: 10)  # Get 10 more messages
+
+  ### Dynamic Mode Switching
+
+      {:ok, conn} = Connection.connect(
+        host: "example.com",
+        port: 443,
+        config: config,
+        active: true
+      )
+
+      receive do
+        {:quic_connected, ^conn} -> :ok
+      end
+
+      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
+      Connection.stream_send(conn, stream_id, "GET /large-file HTTP/1.1\\r\\n\\r\\n", fin: true)
+
+      # Start receiving actively
+      receive do
+        {:quic_stream, ^conn, ^stream_id, _chunk1} ->
+          # Getting too much data, switch to passive for backpressure
+          Connection.setopts(conn, active: false)
+      end
+
+      # Now control reading rate manually
+      loop_read_with_backpressure(conn, stream_id)
+
+  ## Compatibility
+
+  This function follows `:gen_tcp.setopts/2` conventions for compatibility with
+  existing Erlang/Elixir networking code. Applications can switch between TCP and
+  QUIC with minimal code changes.
+
+  ## Thread Safety
+
+  `setopts/2` is safe to call concurrently with stream operations. Mode changes
+  take effect immediately for new incoming data.
+
+  ## Performance Notes
+
+  - **Active mode** (`true`): Lowest latency, but can cause mailbox overflow under load
+  - **Passive mode** (`false`): Full backpressure control, but requires explicit reads
+  - **:once mode**: Best balance for most applications - automatic delivery with flow control
+  - **Integer mode** (`N`): Batch processing - good for high-throughput workloads
+
+  ## See Also
+
+    * `connect/1` - Set initial active mode when connecting
+    * `stream_recv/3` - Read data in passive mode
+    * `readable_streams/1` - Get list of streams with buffered data
   """
   @spec setopts(pid(), keyword()) :: :ok | {:error, term()}
   def setopts(pid, opts) do

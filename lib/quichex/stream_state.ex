@@ -9,8 +9,52 @@ defmodule Quichex.StreamState do
   - FIN flags
   - Flow control windows
 
+  ## Buffer Memory Management
+
+  The buffer in passive mode is **unbounded** by design, following `:gen_tcp`
+  conventions. Applications are responsible for flow control to prevent
+  unbounded memory growth.
+
+  ### Best Practices
+
+  **Passive Mode (`active: false`):**
+  - Regularly call `stream_recv/3` to drain buffers
+  - Monitor `buffer_size/1` if processing slower than data arrival
+  - Set appropriate read buffer sizes (max_len parameter)
+
+  **Active Mode with Backpressure:**
+  - Use `:once` mode for per-message flow control (recommended)
+  - Use `{:active, N}` for batch processing
+  - Switch to passive with `setopts/2` when mailbox grows too large
+
+  **Warning Signs of Buffer Issues:**
+  - `buffer_size/1` growing continuously
+  - Memory usage increasing under load
+  - Slow consumer unable to keep up with producer
+
+  ### Example: Monitoring Buffer Size
+
+      # Check buffer size in passive mode
+      {:ok, info} = Connection.info(conn)
+      # Note: buffer_size not currently exposed in info, use for internal monitoring
+
+      # Better: Use active :once for automatic flow control
+      Connection.setopts(conn, active: :once)
+
+  Large buffers indicate slow application consumers. Consider:
+  - Increasing processing parallelism
+  - Using active `:once` mode for natural backpressure
+  - Implementing application-level flow control
+
+  ## Pure Functional Design
+
   All functions are pure - they take a stream state and return a new stream state.
-  No side effects.
+  No side effects, no NIFs, no I/O - just data transformation.
+
+  This separation enables:
+  - Easy testing without network I/O
+  - Predictable state transitions
+  - Functional core / imperative shell pattern
   """
 
   @type stream_id :: non_neg_integer()
