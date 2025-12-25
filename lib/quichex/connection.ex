@@ -41,9 +41,13 @@ defmodule Quichex.Connection do
     * `:active` - Active mode like `:gen_tcp` (default: `true`)
     * `:local_port` - Local port to bind to (default: `0` for random)
     * `:mode` - Workload mode: `:http`, `:webtransport`, or `:auto` (default: `:auto`)
+    * `:stream_handler` - StreamHandler module for incoming streams (default: `nil`)
+    * `:stream_handler_opts` - Options passed to stream handler's `init/4` (default: `[]`)
+    * `:max_stream_handlers` - Maximum concurrent stream handlers (default: `1000`)
 
   ## Examples
 
+      # Basic connection (imperative API)
       config = Quichex.Config.new!()
         |> Quichex.Config.set_application_protos(["http/1.1"])
         |> Quichex.Config.verify_peer(false)
@@ -52,6 +56,15 @@ defmodule Quichex.Connection do
         host: "localhost",
         port: 4433,
         config: config
+      )
+
+      # Connection with stream handler (for incoming streams)
+      {:ok, pid} = Quichex.Connection.connect(
+        host: "server.example.com",
+        port: 4433,
+        config: config,
+        stream_handler: MyApp.EchoHandler,
+        stream_handler_opts: [buffer_size: 4096]
       )
 
   """
@@ -125,12 +138,43 @@ defmodule Quichex.Connection do
   @doc """
   Opens a new stream.
 
-  Returns `{:ok, stream_id}` on success.
+  ## Arguments
+
+    * `pid` - Connection process ID
+    * `opts` - Options (keyword list or atom for backward compatibility)
+
+  ## Options
+
+    * `:type` - Stream type: `:bidirectional` or `:unidirectional` (default: `:bidirectional`)
+    * `:handler` - StreamHandler module to spawn for this stream (default: `nil`)
+    * `:handler_opts` - Options passed to handler's `init/4` callback (default: `[]`)
+
+  ## Returns
+
+    * `{:ok, stream_id}` - Stream ID (imperative API, when no handler)
+    * `{:ok, handler_pid}` - Handler PID (when handler provided)
+    * `{:error, reason}` - On failure
+
+  ## Examples
+
+      # Imperative API (backward compatible)
+      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
+
+      # With handler (new StreamHandler API)
+      {:ok, handler_pid} = Connection.open_stream(conn,
+        type: :bidirectional,
+        handler: MyApp.EchoHandler,
+        handler_opts: [buffer_size: 4096]
+      )
   """
-  @spec open_stream(pid(), :bidirectional | :unidirectional) ::
-          {:ok, non_neg_integer()} | {:error, term()}
+  @spec open_stream(pid(), :bidirectional | :unidirectional | keyword()) ::
+          {:ok, non_neg_integer() | pid()} | {:error, term()}
+  def open_stream(pid, opts) when is_list(opts) do
+    :gen_statem.call(pid, {:open_stream, opts})
+  end
+
   def open_stream(pid, type) when type in [:bidirectional, :unidirectional] do
-    :gen_statem.call(pid, {:open_stream, type})
+    open_stream(pid, type: type)
   end
 
   @doc """
@@ -146,17 +190,6 @@ defmodule Quichex.Connection do
   def stream_send(pid, stream_id, data, opts \\ []) do
     fin = Keyword.get(opts, :fin, false)
     :gen_statem.call(pid, {:stream_send, stream_id, data, fin})
-  end
-
-  @doc """
-  Receives data from a stream (passive mode).
-
-  Returns `{:ok, data, fin?}` where `fin?` indicates if this is the last data.
-  """
-  @spec stream_recv(pid(), non_neg_integer(), non_neg_integer()) ::
-          {:ok, binary(), boolean()} | {:error, term()}
-  def stream_recv(pid, stream_id, max_len \\ 65535) do
-    :gen_statem.call(pid, {:stream_recv, stream_id, max_len})
   end
 
   @doc """
@@ -191,193 +224,6 @@ defmodule Quichex.Connection do
       when direction in [:read, :write, :both] do
     error_code = Keyword.get(opts, :error_code, 0)
     :gen_statem.call(pid, {:stream_shutdown, stream_id, direction, error_code})
-  end
-
-  @doc """
-  Sets socket options dynamically (similar to `:gen_tcp.setopts/2`).
-
-  This function allows you to change connection behavior at runtime, most commonly
-  to control message delivery mode for flow control and backpressure management.
-
-  ## Options
-
-    * `:active` - Controls message delivery mode:
-      - `true` - Messages delivered automatically to controlling process (default)
-      - `false` - Passive mode, use `stream_recv/3` to explicitly read data
-      - `:once` - Deliver one message then automatically switch to passive
-      - `{:active, N}` - Deliver N messages then automatically switch to passive (N > 0)
-
-  ## Message Delivery Guarantees
-
-  ### Switching from **Passive to Active** (`false` → `true`/`:once`/N):
-
-  - **Buffered data is NOT automatically delivered**
-  - Only **new incoming data** after the switch triggers message delivery
-  - To drain buffered data, call `stream_recv/3` before switching modes
-  - This behavior matches `:gen_tcp` for compatibility
-
-  ### Switching from **Active to Passive** (`true`/`:once`/N → `false`):
-
-  - **Messages already sent to mailbox are not revoked**
-  - **New data arriving after switch** is buffered instead of delivered
-  - No message loss during the transition
-  - Mode switch takes effect immediately for new data
-
-  ### Active Count Behavior:
-
-  - Count is **per-message**, not per-stream (global to connection)
-  - Each message (`{:quic_stream, ...}`, `{:quic_stream_fin, ...}`) decrements count
-  - When count reaches 0, mode automatically switches to `false` (passive)
-  - Connection notifications (`{:quic_connected, ...}`) also count toward limit
-
-  ## Examples
-
-  ### Active Mode (Default) - Automatic Delivery
-
-      {:ok, conn} = Connection.connect(
-        host: "example.com",
-        port: 443,
-        config: config,
-        active: true  # default
-      )
-
-      # Receive connection notification
-      receive do
-        {:quic_connected, ^conn} -> :ok
-      end
-
-      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
-      Connection.stream_send(conn, stream_id, "GET / HTTP/1.1\\r\\n\\r\\n", fin: true)
-
-      # Messages delivered automatically
-      receive do
-        {:quic_stream, ^conn, ^stream_id, data} ->
-          IO.puts("Received: \#{byte_size(data)} bytes")
-
-        {:quic_stream_fin, ^conn, ^stream_id} ->
-          IO.puts("Stream finished")
-      end
-
-  ### Passive Mode - Explicit Reading
-
-      {:ok, conn} = Connection.connect(
-        host: "example.com",
-        port: 443,
-        config: config,
-        active: false
-      )
-
-      # Wait for connection (no automatic notification)
-      :ok = Connection.wait_connected(conn, timeout: 5_000)
-
-      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
-      Connection.stream_send(conn, stream_id, "GET / HTTP/1.1\\r\\n\\r\\n", fin: true)
-
-      # Must explicitly read data
-      {:ok, data, fin?} = Connection.stream_recv(conn, stream_id)
-      IO.puts("Read \#{byte_size(data)} bytes, FIN=\#{fin?}")
-
-  ### :once Mode - Manual Flow Control
-
-      {:ok, conn} = Connection.connect(
-        host: "example.com",
-        port: 443,
-        config: config,
-        active: :once
-      )
-
-      # Get one message
-      receive do
-        {:quic_connected, ^conn} -> :ok
-      end
-
-      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
-      Connection.stream_send(conn, stream_id, "GET / HTTP/1.1\\r\\n\\r\\n", fin: true)
-
-      # Receive one stream message, then automatically passive
-      receive do
-        {:quic_stream, ^conn, ^stream_id, data} ->
-          process_data(data)
-          # Re-enable to get next message
-          Connection.setopts(conn, active: :once)
-      end
-
-  ### Integer Mode - Batch Flow Control
-
-      {:ok, conn} = Connection.connect(
-        host: "example.com",
-        port: 443,
-        config: config,
-        active: 5  # Receive 5 messages then pause
-      )
-
-      # Will receive up to 5 messages (connection + stream data)
-      Enum.each(1..5, fn _ ->
-        receive do
-          {:quic_connected, ^conn} -> :ok
-          {:quic_stream, ^conn, stream_id, data} -> process(stream_id, data)
-          {:quic_stream_fin, ^conn, stream_id} -> finish(stream_id)
-        after
-          5_000 -> :timeout
-        end
-      end)
-
-      # Now passive - must use setopts to re-enable
-      Connection.setopts(conn, active: 10)  # Get 10 more messages
-
-  ### Dynamic Mode Switching
-
-      {:ok, conn} = Connection.connect(
-        host: "example.com",
-        port: 443,
-        config: config,
-        active: true
-      )
-
-      receive do
-        {:quic_connected, ^conn} -> :ok
-      end
-
-      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
-      Connection.stream_send(conn, stream_id, "GET /large-file HTTP/1.1\\r\\n\\r\\n", fin: true)
-
-      # Start receiving actively
-      receive do
-        {:quic_stream, ^conn, ^stream_id, _chunk1} ->
-          # Getting too much data, switch to passive for backpressure
-          Connection.setopts(conn, active: false)
-      end
-
-      # Now control reading rate manually
-      loop_read_with_backpressure(conn, stream_id)
-
-  ## Compatibility
-
-  This function follows `:gen_tcp.setopts/2` conventions for compatibility with
-  existing Erlang/Elixir networking code. Applications can switch between TCP and
-  QUIC with minimal code changes.
-
-  ## Thread Safety
-
-  `setopts/2` is safe to call concurrently with stream operations. Mode changes
-  take effect immediately for new incoming data.
-
-  ## Performance Notes
-
-  - **Active mode** (`true`): Lowest latency, but can cause mailbox overflow under load
-  - **Passive mode** (`false`): Full backpressure control, but requires explicit reads
-  - **:once mode**: Best balance for most applications - automatic delivery with flow control
-  - **Integer mode** (`N`): Batch processing - good for high-throughput workloads
-
-  ## See Also
-
-    * `connect/1` - Set initial active mode when connecting
-    * `stream_recv/3` - Read data in passive mode
-    * `readable_streams/1` - Get list of streams with buffered data
-  """
-  @spec setopts(pid(), keyword()) :: :ok | {:error, term()}
-  def setopts(pid, opts) do
-    :gen_statem.call(pid, {:setopts, opts})
   end
 
   ## gen_statem Callbacks
@@ -566,8 +412,8 @@ defmodule Quichex.Connection do
     {:keep_state, new_data}
   end
 
-  def connected(:info, {:stream_worker_sent, stream_id, bytes_written}, data) do
-    # StreamWorker notified us that it wrote data
+  def connected(:info, {:stream_handler_sent, stream_id, bytes_written}, data) do
+    # StreamHandler notified us that it wrote data
     # Update stream state and generate packets
     {stream, new_data} = State.get_or_create_stream(data, stream_id, :bidirectional)
 
@@ -585,6 +431,18 @@ defmodule Quichex.Connection do
     {:keep_state, new_data}
   end
 
+  def connected(:info, {:stream_handler_spawned, stream_id, handler_pid}, data) do
+    # Update state to track the spawned handler
+    Logger.debug("Stream handler spawned for incoming stream #{stream_id}: #{inspect(handler_pid)}")
+
+    new_data = %{
+      data
+      | stream_handlers: Map.put(data.stream_handlers, stream_id, handler_pid)
+    }
+
+    {:keep_state, new_data}
+  end
+
   def connected({:call, from}, :wait_connected, _data) do
     {:keep_state_and_data, [{:reply, from, :ok}]}
   end
@@ -597,28 +455,59 @@ defmodule Quichex.Connection do
     {:keep_state_and_data, [{:reply, from, false}]}
   end
 
-  def connected({:call, from}, {:open_stream, type}, data) do
+  def connected({:call, from}, {:open_stream, opts}, data) when is_list(opts) do
+    type = Keyword.get(opts, :type, :bidirectional)
+    handler = Keyword.get(opts, :handler)
+    handler_opts = Keyword.get(opts, :handler_opts, [])
+
     {stream_id, new_data} = StateMachine.open_stream(data, type)
-    {:keep_state, new_data, [{:reply, from, {:ok, stream_id}}]}
-  end
 
-  def connected({:call, from}, {:stream_send, stream_id, data_bytes, fin}, data) do
-    # Use StreamDispatcher for concurrent stream operations
-    case Quichex.StreamDispatcher.send(data, stream_id, data_bytes, fin) do
-      {:ok, new_data} ->
-        {actions, new_data} = State.take_actions(new_data)
-        execute_actions(actions, new_data)
-        {:keep_state, new_data, [{:reply, from, :ok}]}
+    # ALWAYS spawn StreamHandler (use Default if no handler provided)
+    handler_module = handler || Quichex.StreamHandler.Default
 
-      {:error, new_data, reason} ->
+    # For DefaultStreamHandler, inject controlling_process and conn_pid
+    final_handler_opts =
+      if handler_module == Quichex.StreamHandler.Default do
+        Keyword.merge(handler_opts,
+          controlling_process: new_data.controlling_process,
+          conn_pid: self()
+        )
+      else
+        handler_opts
+      end
+
+    case spawn_stream_handler(new_data, stream_id, :outgoing, type, handler_module, final_handler_opts) do
+      {:ok, handler_pid, updated_data} ->
+        # Return handler_pid if user provided handler, stream_id otherwise (backward compat)
+        result = if handler, do: {:ok, handler_pid}, else: {:ok, stream_id}
+        {:keep_state, updated_data, [{:reply, from, result}]}
+
+      {:error, reason} ->
         {:keep_state, new_data, [{:reply, from, {:error, reason}}]}
     end
   end
 
-  def connected({:call, from}, {:stream_recv, stream_id, max_len}, data) do
-    # Use StreamDispatcher for consistent stream handling
-    {result, new_data} = Quichex.StreamDispatcher.recv(data, stream_id, max_len)
-    {:keep_state, new_data, [{:reply, from, result}]}
+  # Backward compatibility: handle old {:open_stream, type} format
+  def connected({:call, from}, {:open_stream, type}, data) when is_atom(type) do
+    connected({:call, from}, {:open_stream, [type: type]}, data)
+  end
+
+  def connected({:call, from}, {:stream_send, stream_id, data_bytes, fin}, state) do
+    # Route through StreamHandler (every stream has one)
+    case Map.get(state.stream_handlers, stream_id) do
+      nil ->
+        {:keep_state_and_data, [{:reply, from, {:error, :stream_not_found}}]}
+
+      handler_pid ->
+        # Send via handler (all mutations go through stream process)
+        case Quichex.StreamHandler.send_data(handler_pid, data_bytes, fin) do
+          :ok ->
+            {:keep_state_and_data, [{:reply, from, :ok}]}
+
+          {:error, reason} ->
+            {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
+        end
+    end
   end
 
   def connected({:call, from}, :readable_streams, data) do
@@ -639,17 +528,6 @@ defmodule Quichex.Connection do
     execute_actions(actions, new_data)
 
     {:keep_state, new_data, [{:reply, from, :ok}]}
-  end
-
-  def connected({:call, from}, {:setopts, opts}, data) do
-    case Keyword.fetch(opts, :active) do
-      {:ok, active} ->
-        new_data = State.set_active(data, active)
-        {:keep_state, new_data, [{:reply, from, :ok}]}
-
-      :error ->
-        {:keep_state_and_data, [{:reply, from, {:error, :invalid_option}}]}
-    end
   end
 
   def connected({:call, from}, {:close, opts}, data) do
@@ -710,6 +588,21 @@ defmodule Quichex.Connection do
     {:stop, :normal}
   end
 
+  # Ignore timeout messages in closed state
+  def closed(:info, :quic_timeout, _data) do
+    :keep_state_and_data
+  end
+
+  # Ignore UDP packets in closed state
+  def closed(:info, {:udp, _socket, _ip, _port, _packet}, _data) do
+    :keep_state_and_data
+  end
+
+  # Ignore stream handler messages in closed state
+  def closed(:info, {:stream_handler_sent, _stream_id, _bytes}, _data) do
+    :keep_state_and_data
+  end
+
   def closed({:call, from}, :is_closed?, _data) do
     {:keep_state_and_data, [{:reply, from, true}]}
   end
@@ -742,6 +635,9 @@ defmodule Quichex.Connection do
     active = Keyword.get(opts, :active, true)
     local_port = Keyword.get(opts, :local_port, 0)
     mode = Keyword.get(opts, :mode, :auto)
+    stream_handler = Keyword.get(opts, :stream_handler)
+    stream_handler_opts = Keyword.get(opts, :stream_handler_opts, [])
+    max_stream_handlers = Keyword.get(opts, :max_stream_handlers, 1000)
 
     # Resolve hostname to IP
     peer_addr = resolve_address(host, port)
@@ -780,12 +676,22 @@ defmodule Quichex.Connection do
            config.resource
          ) do
       {:ok, conn_resource} ->
+        # Start StreamHandlerSupervisor for this connection
+        {:ok, stream_handler_sup} =
+          DynamicSupervisor.start_link(
+            strategy: :one_for_one,
+            max_children: max_stream_handlers
+          )
+
         # Create state
         state =
           State.new(conn_resource, socket, local_addr, peer_addr, config,
             server_name: host,
             active: active,
-            mode: mode
+            mode: mode,
+            stream_handler: stream_handler,
+            stream_handler_opts: stream_handler_opts,
+            stream_handler_sup: stream_handler_sup
           )
 
         state = %{state | controlling_process: parent_pid, scid: scid}
@@ -835,6 +741,106 @@ defmodule Quichex.Connection do
       conn_resource: data.conn_resource
     }
 
-    Action.execute_all(actions, context)
+    Enum.each(actions, fn action ->
+      case action do
+        {:spawn_stream_handler, stream_id, direction, stream_type, initial_data, initial_fin} ->
+          # ALWAYS spawn handler (use DefaultStreamHandler if no user handler configured)
+          if data.stream_handler_sup do
+            handler_module = data.stream_handler || Quichex.StreamHandler.Default
+
+            # For DefaultStreamHandler, inject controlling_process and conn_pid
+            final_handler_opts =
+              if handler_module == Quichex.StreamHandler.Default do
+                Keyword.merge(data.stream_handler_opts || [],
+                  controlling_process: data.controlling_process,
+                  conn_pid: self()
+                )
+              else
+                data.stream_handler_opts || []
+              end
+
+            handler_init_opts = [
+              conn_resource: data.conn_resource,
+              conn_pid: self(),
+              stream_id: stream_id,
+              direction: direction,
+              stream_type: stream_type,
+              handler_module: handler_module,
+              handler_opts: final_handler_opts
+            ]
+
+            case DynamicSupervisor.start_child(
+                   data.stream_handler_sup,
+                   {Quichex.StreamHandler, handler_init_opts}
+                 ) do
+              {:ok, handler_pid} ->
+                # Send initial data to handler immediately
+                GenServer.cast(handler_pid, {:stream_data, initial_data, initial_fin})
+
+                # Send message to self to update state
+                send(self(), {:stream_handler_spawned, stream_id, handler_pid})
+                :ok
+
+              {:error, reason} ->
+                Logger.warning(
+                  "Failed to spawn incoming stream handler for stream #{stream_id}: #{inspect(reason)}"
+                )
+
+                :ok
+            end
+          end
+
+        {:route_to_handler, handler_pid, data_bytes, fin} ->
+          # Send data to handler process
+          GenServer.cast(handler_pid, {:stream_data, data_bytes, fin})
+
+        _ ->
+          # Delegate other actions to Action module
+          Action.execute(action, context)
+      end
+    end)
+
+    :ok
+  end
+
+  defp spawn_stream_handler(state, stream_id, direction, stream_type, handler_module, handler_opts) do
+    if state.stream_handler_sup do
+      handler_init_opts = [
+        conn_resource: state.conn_resource,
+        conn_pid: self(),
+        stream_id: stream_id,
+        direction: direction,
+        stream_type: stream_type,
+        handler_module: handler_module,
+        handler_opts: handler_opts
+      ]
+
+      case DynamicSupervisor.start_child(
+             state.stream_handler_sup,
+             {Quichex.StreamHandler, handler_init_opts}
+           ) do
+        {:ok, handler_pid} ->
+          Logger.debug(
+            "Spawned StreamHandler for stream #{stream_id}: direction=#{direction}, type=#{stream_type}, module=#{inspect(handler_module)}"
+          )
+
+          updated_state = %{
+            state
+            | stream_handlers: Map.put(state.stream_handlers, stream_id, handler_pid)
+          }
+
+          {:ok, handler_pid, updated_state}
+
+        {:error, reason} ->
+          Logger.error("Failed to spawn StreamHandler for stream #{stream_id}: #{inspect(reason)}")
+          {:error, reason}
+      end
+    else
+      Logger.warning(
+        "Cannot spawn StreamHandler: StreamHandlerSupervisor not initialized"
+      )
+
+      {:error, :no_supervisor}
+    end
   end
 end

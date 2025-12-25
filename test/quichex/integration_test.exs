@@ -109,41 +109,6 @@ defmodule Quichex.IntegrationTest do
       Connection.close(conn)
     end
 
-    test "passive mode stream recv" do
-      config =
-        Config.new!()
-        |> Config.set_application_protos(["h3"])
-        |> Config.verify_peer(false)
-
-      {:ok, conn} =
-        Connection.connect(
-          host: "cloudflare-quic.com",
-          port: 443,
-          config: config,
-          active: false
-        )
-
-      assert :ok = Connection.wait_connected(conn, timeout: 10_000)
-
-      # Open stream and send data
-      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
-      assert :ok = Connection.stream_send(conn, stream_id, "Test data", fin: true)
-
-      # Try to receive (might get error if no data available)
-      case Connection.stream_recv(conn, stream_id, 1024) do
-        {:ok, _data, _fin} -> :ok
-        {:error, _} -> :ok  # Server might not respond
-      end
-
-      # Check readable streams
-      case Connection.readable_streams(conn) do
-        {:ok, streams} -> assert is_list(streams)
-        {:error, _} -> :ok
-      end
-
-      Connection.close(conn)
-    end
-
     test "multiple concurrent streams work correctly" do
       config =
         Config.new!()

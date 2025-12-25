@@ -5,46 +5,9 @@ defmodule Quichex.StreamState do
   Each stream maintains its own state including:
   - Type (bidirectional or unidirectional)
   - Direction (send, recv, or both)
-  - Buffer for passive mode
   - FIN flags
   - Flow control windows
-
-  ## Buffer Memory Management
-
-  The buffer in passive mode is **unbounded** by design, following `:gen_tcp`
-  conventions. Applications are responsible for flow control to prevent
-  unbounded memory growth.
-
-  ### Best Practices
-
-  **Passive Mode (`active: false`):**
-  - Regularly call `stream_recv/3` to drain buffers
-  - Monitor `buffer_size/1` if processing slower than data arrival
-  - Set appropriate read buffer sizes (max_len parameter)
-
-  **Active Mode with Backpressure:**
-  - Use `:once` mode for per-message flow control (recommended)
-  - Use `{:active, N}` for batch processing
-  - Switch to passive with `setopts/2` when mailbox grows too large
-
-  **Warning Signs of Buffer Issues:**
-  - `buffer_size/1` growing continuously
-  - Memory usage increasing under load
-  - Slow consumer unable to keep up with producer
-
-  ### Example: Monitoring Buffer Size
-
-      # Check buffer size in passive mode
-      {:ok, info} = Connection.info(conn)
-      # Note: buffer_size not currently exposed in info, use for internal monitoring
-
-      # Better: Use active :once for automatic flow control
-      Connection.setopts(conn, active: :once)
-
-  Large buffers indicate slow application consumers. Consider:
-  - Increasing processing parallelism
-  - Using active `:once` mode for natural backpressure
-  - Implementing application-level flow control
+  - Byte counters
 
   ## Pure Functional Design
 
@@ -55,6 +18,12 @@ defmodule Quichex.StreamState do
   - Easy testing without network I/O
   - Predictable state transitions
   - Functional core / imperative shell pattern
+
+  ## Data Flow
+
+  Stream data is delivered immediately to StreamHandler callbacks for minimum latency.
+  No buffering occurs at the StreamState level - handlers are responsible for any
+  buffering they need.
   """
 
   @type stream_id :: non_neg_integer()
@@ -65,7 +34,6 @@ defmodule Quichex.StreamState do
           stream_id: stream_id(),
           type: stream_type(),
           direction: direction(),
-          buffer: [buffer_entry()],
           fin_sent: boolean(),
           fin_received: boolean(),
           send_window: non_neg_integer(),
@@ -74,12 +42,9 @@ defmodule Quichex.StreamState do
           bytes_received: non_neg_integer()
         }
 
-  @type buffer_entry :: {data :: binary(), fin :: boolean()}
-
   defstruct stream_id: nil,
             type: :bidirectional,
             direction: :both,
-            buffer: [],
             fin_sent: false,
             fin_received: false,
             send_window: 0,
@@ -111,81 +76,6 @@ defmodule Quichex.StreamState do
       type: type,
       direction: direction
     }
-  end
-
-  @doc """
-  Adds data to the stream's buffer (for passive mode).
-
-  Returns an updated stream state with the data appended to the buffer.
-
-  ## Examples
-
-      iex> stream = StreamState.new(4, :bidirectional)
-      iex> stream = StreamState.buffer_data(stream, <<1, 2, 3>>, false)
-      iex> length(stream.buffer)
-      1
-  """
-  @spec buffer_data(t(), binary(), boolean()) :: t()
-  def buffer_data(%__MODULE__{} = stream, data, fin) when is_binary(data) and is_boolean(fin) do
-    entry = {data, fin}
-    %{stream | buffer: stream.buffer ++ [entry]}
-  end
-
-  @doc """
-  Drains buffered data up to max_len bytes.
-
-  Returns a tuple of `{drained_data, updated_stream}` where:
-  - `drained_data` is a list of `{data, fin}` tuples
-  - `updated_stream` has the drained entries removed from the buffer
-
-  If max_len is reached mid-entry, that entry is kept in the buffer.
-
-  ## Examples
-
-      iex> stream = StreamState.new(4, :bidirectional)
-      iex> stream = StreamState.buffer_data(stream, <<1, 2, 3>>, false)
-      iex> stream = StreamState.buffer_data(stream, <<4, 5>>, true)
-      iex> {drained, _stream} = StreamState.drain_buffer(stream, 100)
-      iex> length(drained)
-      2
-  """
-  @spec drain_buffer(t(), non_neg_integer()) :: {[buffer_entry()], t()}
-  def drain_buffer(%__MODULE__{buffer: buffer} = stream, max_len) do
-    {drained, remaining} = drain_entries(buffer, max_len, [])
-    updated_stream = %{stream | buffer: remaining}
-    {Enum.reverse(drained), updated_stream}
-  end
-
-  defp drain_entries([], _max_len, acc), do: {acc, []}
-
-  defp drain_entries([{data, _fin} = entry | rest], max_len, acc) do
-    data_size = byte_size(data)
-
-    if data_size <= max_len do
-      # Can drain this entry
-      drain_entries(rest, max_len - data_size, [entry | acc])
-    else
-      # Can't drain this entry without exceeding max_len
-      # Keep it in the buffer
-      {acc, [entry | rest]}
-    end
-  end
-
-  @doc """
-  Returns the total size of buffered data in bytes.
-
-  ## Examples
-
-      iex> stream = StreamState.new(4, :bidirectional)
-      iex> stream = StreamState.buffer_data(stream, <<1, 2, 3>>, false)
-      iex> StreamState.buffer_size(stream)
-      3
-  """
-  @spec buffer_size(t()) :: non_neg_integer()
-  def buffer_size(%__MODULE__{buffer: buffer}) do
-    Enum.reduce(buffer, 0, fn {data, _fin}, acc ->
-      acc + byte_size(data)
-    end)
   end
 
   @doc """
@@ -240,10 +130,4 @@ defmodule Quichex.StreamState do
   def finished?(%__MODULE__{direction: :recv, fin_received: true}), do: true
   def finished?(_stream), do: false
 
-  @doc """
-  Checks if the stream has any buffered data.
-  """
-  @spec has_buffered_data?(t()) :: boolean()
-  def has_buffered_data?(%__MODULE__{buffer: []}), do: false
-  def has_buffered_data?(%__MODULE__{}), do: true
 end

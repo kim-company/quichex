@@ -5,17 +5,20 @@ defmodule Quichex.State do
   This module defines the complete state for a QUIC connection, including:
   - Connection resource (NIF reference to quiche connection)
   - Network addresses (local and peer)
-  - Socket mode (active/passive)
   - Stream states
   - Pending actions to be executed
 
   All state transformations are pure functions. The state machine operates
   on this struct and returns `{new_state, actions}` tuples.
+
+  ## Socket Mode
+
+  The UDP socket is always in `{active, true}` mode for minimum latency.
+  Data is immediately delivered to StreamHandler callbacks - no buffering.
   """
 
   alias Quichex.{StreamState, Action}
 
-  @type active_mode :: boolean() | :once | pos_integer()
   @type workload_mode :: :http | :webtransport | :auto
 
   @type t :: %__MODULE__{
@@ -33,10 +36,6 @@ defmodule Quichex.State do
           stream_workers: %{StreamState.stream_id() => pid()},
           waiters: [:gen_statem.from()],
 
-          # Socket mode
-          active: active_mode(),
-          active_count: non_neg_integer() | :infinity,
-
           # Connection lifecycle
           established: boolean(),
           closed: boolean(),
@@ -47,6 +46,12 @@ defmodule Quichex.State do
           next_uni_stream: non_neg_integer(),
           streams: %{StreamState.stream_id() => StreamState.t()},
           readable_streams: [StreamState.stream_id()],
+
+          # Stream handler support (Phase 1)
+          stream_handler: module() | nil,
+          stream_handler_opts: keyword(),
+          stream_handler_sup: pid() | nil,
+          stream_handlers: %{StreamState.stream_id() => pid()},
 
           # Actions queue
           pending_actions: [Action.t()],
@@ -76,8 +81,6 @@ defmodule Quichex.State do
             controlling_process: nil,
             stream_workers: %{},
             waiters: [],
-            active: true,
-            active_count: :infinity,
             established: false,
             closed: false,
             close_reason: nil,
@@ -85,6 +88,10 @@ defmodule Quichex.State do
             next_uni_stream: 0,
             streams: %{},
             readable_streams: [],
+            stream_handler: nil,
+            stream_handler_opts: [],
+            stream_handler_sup: nil,
+            stream_handlers: %{},
             pending_actions: [],
             timeout_ref: nil,
             mode: :auto,
@@ -101,10 +108,12 @@ defmodule Quichex.State do
   ## Options
 
     * `:server_name` - Server name for SNI (default: `nil`)
-    * `:active` - Socket active mode (default: `true`)
     * `:mode` - Workload mode: `:http`, `:webtransport`, or `:auto` (default: `:auto`)
     * `:stream_worker_threshold` - Bytes threshold for spawning stream workers (default: 65536)
     * `:max_stream_workers` - Maximum concurrent stream workers (default: 100)
+    * `:stream_handler` - Module implementing Quichex.StreamHandler.Behaviour for incoming streams (default: `nil`)
+    * `:stream_handler_opts` - Options passed to stream handler init (default: `[]`)
+    * `:stream_handler_sup` - PID of StreamHandlerSupervisor (default: `nil`)
 
   ## Examples
 
@@ -121,11 +130,12 @@ defmodule Quichex.State do
       peer_addr: peer_addr,
       config: config,
       server_name: Keyword.get(opts, :server_name),
-      active: Keyword.get(opts, :active, true),
-      active_count: active_to_count(Keyword.get(opts, :active, true)),
       mode: Keyword.get(opts, :mode, :auto),
       stream_worker_threshold: Keyword.get(opts, :stream_worker_threshold, 65_536),
-      max_stream_workers: Keyword.get(opts, :max_stream_workers, 100)
+      max_stream_workers: Keyword.get(opts, :max_stream_workers, 100),
+      stream_handler: Keyword.get(opts, :stream_handler),
+      stream_handler_opts: Keyword.get(opts, :stream_handler_opts, []),
+      stream_handler_sup: Keyword.get(opts, :stream_handler_sup)
     }
   end
 
@@ -215,44 +225,6 @@ defmodule Quichex.State do
   end
 
   @doc """
-  Sets the active mode.
-
-  Returns an updated state with the new active mode and count.
-  """
-  @spec set_active(t(), active_mode()) :: t()
-  def set_active(%__MODULE__{} = state, active) do
-    %{state | active: active, active_count: active_to_count(active)}
-  end
-
-  @doc """
-  Decrements the active count (for {:active, N} mode).
-
-  Returns an updated state. When count reaches 0, the mode switches to passive.
-  """
-  @spec decrement_active_count(t()) :: t()
-  def decrement_active_count(%__MODULE__{active_count: :infinity} = state), do: state
-
-  def decrement_active_count(%__MODULE__{active_count: count} = state) when count > 0 do
-    new_count = count - 1
-    new_active = if new_count == 0, do: false, else: state.active
-
-    %{state | active: new_active, active_count: new_count}
-  end
-
-  def decrement_active_count(state), do: state
-
-  @doc """
-  Checks if the connection should deliver messages to the application.
-
-  Returns `true` if in active mode with remaining count, `false` otherwise.
-  """
-  @spec should_deliver_messages?(t()) :: boolean()
-  def should_deliver_messages?(%__MODULE__{active: false}), do: false
-  def should_deliver_messages?(%__MODULE__{active: true}), do: true
-  def should_deliver_messages?(%__MODULE__{active: :once, active_count: n}), do: n > 0
-  def should_deliver_messages?(%__MODULE__{active_count: n}) when is_integer(n), do: n > 0
-
-  @doc """
   Adds a waiter to the queue (waiting for connection establishment).
   """
   @spec add_waiter(t(), :gen_statem.from()) :: t()
@@ -287,10 +259,4 @@ defmodule Quichex.State do
     %{state | packets_received: state.packets_received + 1}
   end
 
-  # Private helpers
-
-  defp active_to_count(true), do: :infinity
-  defp active_to_count(false), do: 0
-  defp active_to_count(:once), do: 1
-  defp active_to_count(n) when is_integer(n) and n > 0, do: n
 end

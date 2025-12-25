@@ -153,47 +153,6 @@ defmodule Quichex.StateMachine do
   end
 
   @doc """
-  Receives data from a stream (passive mode).
-
-  Reads from the NIF and returns the data. Does not buffer.
-  """
-  @spec stream_recv(State.t(), StreamState.stream_id(), pos_integer()) ::
-          {{:ok, binary(), boolean()}, State.t()} | {{:error, term()}, State.t()}
-  def stream_recv(%State{} = state, stream_id, max_len) do
-    # First check if there's buffered data (passive mode)
-    {stream, state} = State.get_or_create_stream(state, stream_id, :bidirectional)
-
-    case StreamState.drain_buffer(stream, max_len) do
-      {[], ^stream} ->
-        # No buffered data, read from NIF
-        case Native.connection_stream_recv(state.conn_resource, stream_id, max_len) do
-          {:ok, {data, fin}} ->
-            stream =
-              stream
-              |> StreamState.add_bytes_received(byte_size(data))
-              |> (fn s -> if fin, do: StreamState.mark_fin_received(s), else: s end).()
-
-            state = State.update_stream(state, stream)
-            {{:ok, data, fin}, state}
-
-          {:error, reason} ->
-            {{:error, reason}, state}
-        end
-
-      {buffer_data, updated_stream} ->
-        # Return buffered data
-        # Combine all buffered chunks
-        {combined_data, any_fin} =
-          Enum.reduce(buffer_data, {<<>>, false}, fn {data, fin}, {acc_data, acc_fin} ->
-            {acc_data <> data, acc_fin or fin}
-          end)
-
-        state = State.update_stream(state, updated_stream)
-        {{:ok, combined_data, any_fin}, state}
-    end
-  end
-
-  @doc """
   Shuts down a stream in the specified direction.
   """
   @spec stream_shutdown(State.t(), StreamState.stream_id(), :read | :write | :both, non_neg_integer()) ::
@@ -241,19 +200,12 @@ defmodule Quichex.StateMachine do
 
   @doc false
   defp process_readable_streams(%State{} = state) do
-    # Always get readable streams to update our tracking
+    # Always get readable streams and process them immediately
     case Native.connection_readable_streams(state.conn_resource) do
       {:ok, readable_streams} ->
         state = %{state | readable_streams: readable_streams}
-
-        if State.should_deliver_messages?(state) do
-          # Active mode: read and deliver messages
-          Enum.reduce(readable_streams, state, &process_one_stream/2)
-        else
-          # Passive mode: just update the readable list, don't read
-          # Buffer the stream IDs for later explicit recv
-          state
-        end
+        # Always read and route to handlers (immediate delivery)
+        Enum.reduce(readable_streams, state, &process_one_stream/2)
 
       {:error, _reason} ->
         state
@@ -266,6 +218,12 @@ defmodule Quichex.StateMachine do
       {:ok, {data, fin}} when byte_size(data) > 0 or fin ->
         Logger.debug("Stream #{stream_id}: received #{byte_size(data)} bytes, fin=#{fin}")
 
+        # Check if this is a new incoming stream that needs a handler
+        is_new_stream = not Map.has_key?(state.streams, stream_id)
+        has_handler = Map.has_key?(state.stream_handlers, stream_id)
+        # ALWAYS spawn handler for new streams (Connection will use DefaultStreamHandler if no user handler)
+        should_spawn_handler = is_new_stream and not has_handler
+
         # Update stream state
         {stream, state} = State.get_or_create_stream(state, stream_id, :bidirectional)
 
@@ -276,50 +234,37 @@ defmodule Quichex.StateMachine do
 
         state = State.update_stream(state, stream)
 
-        cond do
-          state.active == true or state.active == :once ->
-            # Send message and maybe decrement count
-            actions = [
-              {:send_to_app, state.controlling_process, {:quic_stream, self(), stream_id, data}}
-            ]
+        # If this is a new incoming stream, spawn handler with initial data
+        state =
+          if should_spawn_handler do
+            # Determine direction based on stream ID (odd = peer-initiated)
+            direction = if rem(stream_id, 2) == 1, do: :incoming, else: :outgoing
+            stream_type = :bidirectional  # TODO: detect uni vs bidi
 
-            actions =
-              if fin do
-                [{:send_to_app, state.controlling_process, {:quic_stream_fin, self(), stream_id}} | actions]
-              else
-                actions
-              end
-
-            state = State.add_actions(state, actions)
-
-            # Decrement active count if needed
-            if state.active == :once or is_integer(state.active) do
-              State.decrement_active_count(state)
-            else
-              state
-            end
-
-          is_integer(state.active) and state.active_count > 0 ->
-            # Send message and decrement
-            actions = [
-              {:send_to_app, state.controlling_process, {:quic_stream, self(), stream_id, data}}
-            ]
-
-            actions =
-              if fin do
-                [{:send_to_app, state.controlling_process, {:quic_stream_fin, self(), stream_id}} | actions]
-              else
-                actions
-              end
-
+            # Include initial data in spawn action
+            spawn_action = {:spawn_stream_handler, stream_id, direction, stream_type, data, fin}
+            State.add_action(state, spawn_action)
+          else
             state
-            |> State.add_actions(actions)
-            |> State.decrement_active_count()
+          end
+
+        # Route data based on whether stream has a handler
+        # Every stream should have a handler (DefaultStreamHandler if no user handler)
+        cond do
+          # Just spawned handler - data already included in spawn action
+          should_spawn_handler ->
+            state
+
+          # Stream has a handler - route data to it
+          has_handler ->
+            handler_pid = Map.get(state.stream_handlers, stream_id)
+            action = {:route_to_handler, handler_pid, data, fin}
+            State.add_action(state, action)
 
           true ->
-            # Passive mode: buffer the data
-            stream = StreamState.buffer_data(stream, data, fin)
-            State.update_stream(state, stream)
+            # No handler - shouldn't happen if we always spawn handlers
+            Logger.warning("Received data for stream #{stream_id} without handler - dropping data")
+            state
         end
 
       {:ok, {_data, _fin}} ->
