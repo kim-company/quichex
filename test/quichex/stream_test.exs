@@ -1,7 +1,7 @@
 defmodule Quichex.StreamTest do
   use ExUnit.Case, async: false
 
-  alias Quichex.{Config, Connection}
+  alias Quichex.{Config, Connection, StreamHandler}
 
   @moduletag :stream
 
@@ -25,7 +25,7 @@ defmodule Quichex.StreamTest do
       {:ok, config: config}
     end
 
-    test "open_stream/2 returns stream ID for bidirectional stream", %{config: config} do
+    test "open_stream/2 returns handler PID for bidirectional stream", %{config: config} do
       {:ok, conn} =
         Connection.connect(
           host: "cloudflare-quic.com",
@@ -37,18 +37,19 @@ defmodule Quichex.StreamTest do
       :ok = Connection.wait_connected(conn, timeout: 10_000)
 
       # Open a bidirectional stream
-      assert {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
+      assert {:ok, handler} = Connection.open_stream(conn, :bidirectional)
+      assert is_pid(handler)
       # Client-initiated bidirectional streams are 0, 4, 8, 12, ...
-      assert stream_id == 0
+      assert StreamHandler.stream_id(handler) == 0
 
       # Open another one
-      assert {:ok, stream_id2} = Connection.open_stream(conn, :bidirectional)
-      assert stream_id2 == 4
+      assert {:ok, handler2} = Connection.open_stream(conn, :bidirectional)
+      assert StreamHandler.stream_id(handler2) == 4
 
       Connection.close(conn)
     end
 
-    test "open_stream/2 returns stream ID for unidirectional stream", %{config: config} do
+    test "open_stream/2 returns handler PID for unidirectional stream", %{config: config} do
       {:ok, conn} =
         Connection.connect(
           host: "cloudflare-quic.com",
@@ -59,18 +60,19 @@ defmodule Quichex.StreamTest do
       :ok = Connection.wait_connected(conn, timeout: 10_000)
 
       # Open a unidirectional stream
-      assert {:ok, stream_id} = Connection.open_stream(conn, :unidirectional)
+      assert {:ok, handler} = Connection.open_stream(conn, :unidirectional)
+      assert is_pid(handler)
       # Client-initiated unidirectional streams are 2, 6, 10, 14, ...
-      assert stream_id == 2
+      assert StreamHandler.stream_id(handler) == 2
 
       # Open another one
-      assert {:ok, stream_id2} = Connection.open_stream(conn, :unidirectional)
-      assert stream_id2 == 6
+      assert {:ok, handler2} = Connection.open_stream(conn, :unidirectional)
+      assert StreamHandler.stream_id(handler2) == 6
 
       Connection.close(conn)
     end
 
-    test "stream_send/4 sends data on a stream", %{config: config} do
+    test "StreamHandler.send_data/3 sends data on a stream", %{config: config} do
       {:ok, conn} =
         Connection.connect(
           host: "cloudflare-quic.com",
@@ -80,18 +82,18 @@ defmodule Quichex.StreamTest do
 
       :ok = Connection.wait_connected(conn, timeout: 10_000)
 
-      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
+      {:ok, handler} = Connection.open_stream(conn, :bidirectional)
 
       # Send data without FIN
-      assert :ok = Connection.stream_send(conn, stream_id, "Hello ")
+      assert :ok = StreamHandler.send_data(handler, "Hello ")
 
       # Send more data with FIN
-      assert :ok = Connection.stream_send(conn, stream_id, "QUIC!", fin: true)
+      assert :ok = StreamHandler.send_data(handler, "QUIC!", true)
 
       Connection.close(conn)
     end
 
-    test "stream_send/4 with fin option", %{config: config} do
+    test "StreamHandler.send_data/3 with fin option", %{config: config} do
       {:ok, conn} =
         Connection.connect(
           host: "cloudflare-quic.com",
@@ -101,10 +103,10 @@ defmodule Quichex.StreamTest do
 
       :ok = Connection.wait_connected(conn, timeout: 10_000)
 
-      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
+      {:ok, handler} = Connection.open_stream(conn, :bidirectional)
 
       # Send data with FIN in one call
-      assert :ok = Connection.stream_send(conn, stream_id, "Complete message", fin: true)
+      assert :ok = StreamHandler.send_data(handler, "Complete message", true)
 
       Connection.close(conn)
     end
@@ -138,7 +140,8 @@ defmodule Quichex.StreamTest do
 
       :ok = Connection.wait_connected(conn, timeout: 10_000)
 
-      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
+      {:ok, handler} = Connection.open_stream(conn, :bidirectional)
+      stream_id = StreamHandler.stream_id(handler)
 
       # After opening a stream, it should be writable
       case Connection.writable_streams(conn) do
@@ -154,7 +157,7 @@ defmodule Quichex.StreamTest do
       Connection.close(conn)
     end
 
-    test "stream_shutdown/4 shuts down stream in read direction", %{config: config} do
+    test "StreamHandler.shutdown/3 shuts down stream in read direction", %{config: config} do
       {:ok, conn} =
         Connection.connect(
           host: "cloudflare-quic.com",
@@ -164,15 +167,15 @@ defmodule Quichex.StreamTest do
 
       :ok = Connection.wait_connected(conn, timeout: 10_000)
 
-      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
+      {:ok, handler} = Connection.open_stream(conn, :bidirectional)
 
       # Shutdown read direction
-      assert :ok = Connection.stream_shutdown(conn, stream_id, :read, error_code: 0)
+      assert :ok = StreamHandler.shutdown(handler, :read, error_code: 0)
 
       Connection.close(conn)
     end
 
-    test "stream_shutdown/4 shuts down stream in write direction", %{config: config} do
+    test "StreamHandler.shutdown/3 shuts down stream in write direction", %{config: config} do
       {:ok, conn} =
         Connection.connect(
           host: "cloudflare-quic.com",
@@ -182,15 +185,15 @@ defmodule Quichex.StreamTest do
 
       :ok = Connection.wait_connected(conn, timeout: 10_000)
 
-      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
+      {:ok, handler} = Connection.open_stream(conn, :bidirectional)
 
       # Shutdown write direction
-      assert :ok = Connection.stream_shutdown(conn, stream_id, :write, error_code: 0)
+      assert :ok = StreamHandler.shutdown(handler, :write, error_code: 0)
 
       Connection.close(conn)
     end
 
-    test "stream_shutdown/4 shuts down stream in both directions", %{config: config} do
+    test "StreamHandler.shutdown/3 shuts down stream in both directions", %{config: config} do
       {:ok, conn} =
         Connection.connect(
           host: "cloudflare-quic.com",
@@ -200,10 +203,10 @@ defmodule Quichex.StreamTest do
 
       :ok = Connection.wait_connected(conn, timeout: 10_000)
 
-      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
+      {:ok, handler} = Connection.open_stream(conn, :bidirectional)
 
       # Shutdown both directions
-      assert :ok = Connection.stream_shutdown(conn, stream_id, :both, error_code: 0)
+      assert :ok = StreamHandler.shutdown(handler, :both, error_code: 0)
 
       Connection.close(conn)
     end
@@ -219,19 +222,19 @@ defmodule Quichex.StreamTest do
       :ok = Connection.wait_connected(conn, timeout: 10_000)
 
       # Open multiple streams
-      {:ok, stream1} = Connection.open_stream(conn, :bidirectional)
-      {:ok, stream2} = Connection.open_stream(conn, :bidirectional)
-      {:ok, stream3} = Connection.open_stream(conn, :unidirectional)
+      {:ok, handler1} = Connection.open_stream(conn, :bidirectional)
+      {:ok, handler2} = Connection.open_stream(conn, :bidirectional)
+      {:ok, handler3} = Connection.open_stream(conn, :unidirectional)
 
-      # All should have different IDs
-      assert stream1 != stream2
-      assert stream2 != stream3
-      assert stream1 != stream3
+      # All should have different handler PIDs
+      assert handler1 != handler2
+      assert handler2 != handler3
+      assert handler1 != handler3
 
       # Send data on each stream
-      assert :ok = Connection.stream_send(conn, stream1, "Stream 1")
-      assert :ok = Connection.stream_send(conn, stream2, "Stream 2")
-      assert :ok = Connection.stream_send(conn, stream3, "Stream 3", fin: true)
+      assert :ok = StreamHandler.send_data(handler1, "Stream 1")
+      assert :ok = StreamHandler.send_data(handler2, "Stream 2")
+      assert :ok = StreamHandler.send_data(handler3, "Stream 3", true)
 
       Connection.close(conn)
     end

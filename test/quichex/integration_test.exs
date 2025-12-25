@@ -34,30 +34,30 @@ defmodule Quichex.IntegrationTest do
       assert Connection.is_established?(conn)
 
       # Open a bidirectional stream
-      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
-      assert is_integer(stream_id)
-      assert stream_id == 0  # First client-initiated bidi stream
+      {:ok, handler} = Connection.open_stream(conn, :bidirectional)
+      assert is_pid(handler)
+      assert Quichex.StreamHandler.stream_id(handler) == 0  # First client-initiated bidi stream
 
       # Send a simple HTTP/3 request-like data
       # Note: This is not a real HTTP/3 request (we'd need QPACK encoding for that)
       # Just testing that we can send data
       test_data = "Test data from Quichex"
-      assert :ok = Connection.stream_send(conn, stream_id, test_data, fin: true)
+      assert :ok = Quichex.StreamHandler.send_data(handler, test_data, true)
 
       # Give the server time to process (it likely won't understand our non-HTTP/3 data,
       # but we're just testing that stream operations work)
       Process.sleep(500)
 
       # Open multiple streams to test concurrency
-      {:ok, stream2} = Connection.open_stream(conn, :bidirectional)
-      {:ok, stream3} = Connection.open_stream(conn, :unidirectional)
+      {:ok, handler2} = Connection.open_stream(conn, :bidirectional)
+      {:ok, handler3} = Connection.open_stream(conn, :unidirectional)
 
-      assert stream2 == 4
-      assert stream3 == 2
+      assert Quichex.StreamHandler.stream_id(handler2) == 4
+      assert Quichex.StreamHandler.stream_id(handler3) == 2
 
       # Send data on multiple streams
-      assert :ok = Connection.stream_send(conn, stream2, "Stream 2 data", fin: true)
-      assert :ok = Connection.stream_send(conn, stream3, "Stream 3 data", fin: true)
+      assert :ok = Quichex.StreamHandler.send_data(handler2, "Stream 2 data", true)
+      assert :ok = Quichex.StreamHandler.send_data(handler3, "Stream 3 data", true)
 
       # Clean up
       Connection.close(conn)
@@ -94,14 +94,14 @@ defmodule Quichex.IntegrationTest do
       assert message_received or Connection.is_established?(conn)
 
       # Open and send on a stream
-      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
-      :ok = Connection.stream_send(conn, stream_id, "Test", fin: true)
+      {:ok, handler} = Connection.open_stream(conn, :bidirectional)
+      :ok = Quichex.StreamHandler.send_data(handler, "Test", true)
 
       # We might not receive stream data (server might not respond to our non-HTTP/3 data)
       # But the test verifies the active mode works
       receive do
-        {:quic_stream, ^conn, ^stream_id, _data} -> :ok
-        {:quic_stream_fin, ^conn, ^stream_id} -> :ok
+        {:quic_stream, ^handler, _data} -> :ok
+        {:quic_stream_fin, ^handler} -> :ok
       after
         2_000 -> :ok  # No response is ok
       end
@@ -126,21 +126,22 @@ defmodule Quichex.IntegrationTest do
       assert :ok = Connection.wait_connected(conn, timeout: 10_000)
 
       # Open 5 concurrent streams
-      streams =
+      handlers =
         Enum.map(1..5, fn i ->
-          {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
+          {:ok, handler} = Connection.open_stream(conn, :bidirectional)
           # Send unique data on each stream
-          :ok = Connection.stream_send(conn, stream_id, "Stream #{i} data", fin: true)
-          stream_id
+          :ok = Quichex.StreamHandler.send_data(handler, "Stream #{i} data", true)
+          handler
         end)
 
-      # Verify we got 5 different stream IDs
-      assert length(streams) == 5
-      assert length(Enum.uniq(streams)) == 5
+      # Verify we got 5 different handlers
+      assert length(handlers) == 5
+      assert length(Enum.uniq(handlers)) == 5
 
-      # All should be client-initiated bidirectional (0, 4, 8, 12, 16)
+      # Get stream IDs and verify they are client-initiated bidirectional (0, 4, 8, 12, 16)
+      stream_ids = Enum.map(handlers, &Quichex.StreamHandler.stream_id/1)
       expected = [0, 4, 8, 12, 16]
-      assert streams == expected
+      assert stream_ids == expected
 
       Connection.close(conn)
     end
@@ -160,16 +161,16 @@ defmodule Quichex.IntegrationTest do
 
       assert :ok = Connection.wait_connected(conn, timeout: 10_000)
 
-      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
+      {:ok, handler} = Connection.open_stream(conn, :bidirectional)
 
       # Send some data
-      assert :ok = Connection.stream_send(conn, stream_id, "Test", fin: false)
+      assert :ok = Quichex.StreamHandler.send_data(handler, "Test", false)
 
       # Shutdown write direction
-      assert :ok = Connection.stream_shutdown(conn, stream_id, :write, error_code: 0)
+      assert :ok = Quichex.StreamHandler.shutdown(handler, :write, error_code: 0)
 
       # Try to send again (might fail since we shut down write)
-      case Connection.stream_send(conn, stream_id, "More data") do
+      case Quichex.StreamHandler.send_data(handler, "More data") do
         :ok -> :ok
         {:error, _} -> :ok  # Expected if shutdown worked
       end

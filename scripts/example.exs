@@ -73,23 +73,23 @@ case Quichex.Connection.connect(
         Logger.info("3. Opening bidirectional stream...")
 
         case Quichex.Connection.open_stream(conn, :bidirectional) do
-          {:ok, stream_id} ->
-            Logger.info("   ✓ Stream #{stream_id} opened\n")
+          {:ok, handler} ->
+            Logger.info("   ✓ Stream handler opened\n")
 
             # Send HTTP/0.9 GET request (hq-interop protocol)
             Logger.info("4. Sending HTTP/0.9 GET request...")
             request = "GET /index.html\r\n"
 
-            case Quichex.Connection.stream_send(conn, stream_id, request, fin: true) do
+            case Quichex.StreamHandler.send_data(handler, request, true) do
               :ok ->
                 Logger.info("   ✓ Request sent (#{byte_size(request)} bytes)\n")
 
-                # Wait for response (active mode sends messages to controlling process)
+                # Wait for response (messages sent to controlling process)
                 Logger.info("5. Waiting for response...")
-                Logger.info("   (Active mode: messages sent automatically)\n")
+                Logger.info("   (Messages delivered via StreamHandler)\n")
 
                 receive do
-                  {:quic_stream, ^conn, ^stream_id, data} ->
+                  {:quic_stream, ^handler, data} ->
                     Logger.info("   ✓ Received response!")
                     Logger.info("   Response (#{byte_size(data)} bytes):")
 
@@ -106,7 +106,7 @@ case Quichex.Connection.connect(
 
                     # Wait for stream to finish
                     receive do
-                      {:quic_stream_fin, ^conn, ^stream_id} ->
+                      {:quic_stream_fin, ^handler} ->
                         Logger.info("   ✓ Stream FIN received")
                     after
                       2000 ->

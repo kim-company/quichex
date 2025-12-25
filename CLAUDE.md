@@ -64,11 +64,12 @@ User applications (Phoenix, custom protocols) interact with the public API.
 - **Quichex.Connection (gen_statem)**: Manages individual QUIC connections using gen_statem with functional core pattern. Each connection runs in its own process for fault isolation and concurrency. States: `:init`, `:handshaking`, `:connected`, `:closed`.
 - **Quichex.State**: Pure functional connection state management.
 - **Quichex.StateMachine**: Pure functional state transitions (no side effects).
-- **Quichex.StreamState**: Pure functional stream state with buffering for passive mode.
+- **Quichex.StreamState**: Pure functional stream state (FIN flags, byte counters, flow control).
 - **Quichex.Action**: Side effect system - state machine returns actions, runtime executes them.
+- **Quichex.StreamHandler (GenServer)**: Per-stream processes that handle stream lifecycle and data. Behaviour-based system allows custom stream processing logic.
+- **Quichex.StreamHandler.Default**: Default handler that sends messages to controlling process (imperative API).
 - **Quichex.Listener (GenServer)**: Accepts incoming QUIC connections on the server side. Routes packets to appropriate connection processes.
 - **Quichex.Config**: Struct and builder pattern for QUIC configuration (application protocols, flow control, congestion control, TLS settings).
-- **Quichex.Stream**: Abstraction for QUIC stream operations (bidirectional and unidirectional).
 
 ### Layer 3: Quichex.NIF (Rustler NIFs - Internal)
 Rust NIFs wrap cloudflare/quiche functionality:
@@ -93,10 +94,12 @@ UDP socket I/O for sending and receiving QUIC packets.
 - Pure functional state transitions (StateMachine module) separate from side effects (Action system)
 - Listener is a GenServer that spawns connection processes
 - Supervision tree ensures fault tolerance and crash isolation
-- Active/passive modes similar to :gen_tcp/:gen_udp with proper buffering in StreamState
+- Socket always in `{active, true}` mode for minimum latency
+- Each stream has a StreamHandler GenServer for handling stream lifecycle and data
+- DefaultStreamHandler provides imperative API, custom handlers enable declarative patterns
 
 ### Message Protocol
-When `active: true`, connections send messages to the controlling process:
+Connections always send messages to the controlling process (socket always active):
 - Connection lifecycle: `{:quic_connected, pid}`, `{:quic_connection_error, pid, reason}`, `{:quic_connection_closed, pid, error_code, reason}`
 - Stream data: `{:quic_stream, pid, stream_id, data}`, `{:quic_stream_fin, pid, stream_id}`
 - Datagrams: `{:quic_dgram, pid, data}`
@@ -136,7 +139,7 @@ When `active: true`, connections send messages to the controlling process:
 
 **CRITICAL: All byte data must cross the boundary as `rustler::Binary`**
 
-After comprehensive API audit (see API_AUDIT.md), we've established these conventions:
+After comprehensive API audit, we've established these conventions:
 
 1. **Byte Data**: Always use `Binary` (NEVER `Vec<u8>`)
    ```rust
@@ -175,57 +178,64 @@ After comprehensive API audit (see API_AUDIT.md), we've established these conven
 
 ## Project Status
 
-**Current Status**: Phase 3 Stream Concurrency Complete ✅
+**Current Status**: Architecture Simplified - StreamHandler Complete ✅
 
-The project has completed stream-level concurrency implementation:
+The project has a clean, simplified architecture after removing active/passive mode complexity:
 
-- **Architecture**: gen_statem + functional core + stream-level parallelism
-- **Concurrency**: StreamDispatcher routes operations to inline or parallel StreamWorkers
-- **Performance**: Foundation for 100x throughput improvement (pending benchmarks)
-- **Test Coverage**: 69/69 tests passing (100% pass rate)
+- **Architecture**: gen_statem + functional core + StreamHandler per-stream processes
+- **Concurrency**: Each stream runs in its own StreamHandler GenServer
+- **Simplicity**: Socket always active, immediate data delivery, no buffering
+- **Test Coverage**: 74/74 tests passing (100% pass rate)
 - **API Consistency**: All Elixir<->Rust byte data uses Binary (zero-copy performance)
+
+### Recent Work (Dec 2025)
+
+✅ **Active/Passive Mode Removal**
+- Removed ~2,000 lines of complexity (500 implementation + 1,650 tests)
+- Socket always in `{active, true}` mode for minimum latency
+- Simplified data flow: Socket → Connection → StreamHandler (immediate)
+- Users implement buffering in custom handlers if needed
+
+✅ **StreamHandler Architecture**
+- Each stream has a dedicated StreamHandler GenServer
+- DefaultStreamHandler provides imperative API (messages to controlling process)
+- Custom handlers enable declarative patterns (callbacks for data processing)
+- Clean separation: Connection handles protocol, Handlers handle application logic
 
 ### Implementation Phases
 
-✅ **Phase 1-2: Functional Core & gen_statem** (Weeks 1-3)
+✅ **Phase 1-2: Functional Core & gen_statem**
 - Pure functional state management (State, StateMachine, StreamState, Action)
 - Migrated from GenServer to gen_statem with state_functions callback mode
 - 100% test pass rate achieved
 
-✅ **Phase 3: Stream-Level Concurrency** (Week 3-4)
-- StreamDispatcher with size-based routing heuristics
-- StreamWorker processes for parallel large transfers (≥64KB)
-- Centralized packet batching in connection process
-- Worker lifecycle management and crash isolation
+✅ **Phase 3: StreamHandler Architecture**
+- Per-stream GenServer processes for handling stream lifecycle
+- Behaviour-based handler system for custom stream processing
+- DefaultStreamHandler for backward compatibility with imperative API
+- Simplified architecture after removing active/passive mode (Dec 2025)
 
-### Comprehensive Documentation
-
-- `PHASE3_STREAM_CONCURRENCY.md` - Phase 3 implementation details and architecture
-- `CONSOLIDATION_SUMMARY.md` - Phases 1-2 status and metrics
-- `ARCHITECTURE_REFACTOR_PROGRESS.md` - Phases 1-2 implementation details
-- `API_AUDIT.md` - API consistency decisions
-- `/Users/dmorn/.claude/plans/goofy-riding-bear.md` - Full 6-week refactor plan
-
-### Original Milestones (see PLAN.md)
+### Milestones (see PLAN.md)
 
 1. ✅ Project Scaffolding
 2. ✅ Config and Core NIFs
 3. ✅ Client Connection Establishment
-4. ✅ Stream Operations (parallel execution via StreamDispatcher/StreamWorker)
+4. ✅ Stream Operations (StreamHandler architecture)
 5. ⏳ Server-Side Listener
 6. ⏳ Advanced Features (datagrams, migration, stats)
 7. ⏳ Production Hardening
 
 ### Next Steps
 
-**Phase 3 Remaining:**
-- Write comprehensive tests for stream concurrency (worker behavior, routing logic)
-- Benchmark and verify 100x performance improvement target
-
-**Phase 4+:**
+**Immediate:**
+- Milestone 5: Server-Side Listener (accept incoming connections)
 - UDP I/O optimization (batched packet sending)
-- Active/passive mode completion (full :gen_tcp API)
-- Configuration & Rust optimizations (RwLock, mode-based routing)
+- More integration tests and examples
+
+**Future:**
+- Advanced features: datagrams, connection migration, path migration
+- Performance optimization and benchmarking
+- Production hardening (telemetry, observability, error recovery)
 
 ## Important Conventions
 

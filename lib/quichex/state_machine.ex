@@ -221,7 +221,7 @@ defmodule Quichex.StateMachine do
         # Check if this is a new incoming stream that needs a handler
         is_new_stream = not Map.has_key?(state.streams, stream_id)
         has_handler = Map.has_key?(state.stream_handlers, stream_id)
-        # ALWAYS spawn handler for new streams (Connection will use DefaultStreamHandler if no user handler)
+        # ALWAYS spawn handler for new streams (Connection will use MessageHandler if no user handler)
         should_spawn_handler = is_new_stream and not has_handler
 
         # Update stream state
@@ -249,7 +249,7 @@ defmodule Quichex.StateMachine do
           end
 
         # Route data based on whether stream has a handler
-        # Every stream should have a handler (DefaultStreamHandler if no user handler)
+        # Every stream should have a handler (MessageHandler if no user handler)
         cond do
           # Just spawned handler - data already included in spawn action
           should_spawn_handler ->

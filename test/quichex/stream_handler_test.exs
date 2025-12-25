@@ -332,45 +332,44 @@ defmodule Quichex.StreamHandlerTest do
   end
 
   describe "backward compatibility" do
-    test "imperative API still works alongside handlers", %{config: config} do
+    test "multiple handler types can coexist", %{config: config} do
       {:ok, conn} =
         Connection.connect(
           host: "127.0.0.1",
           port: 4433,
-          config: config,
-          active: false
+          config: config
         )
 
       :ok = Connection.wait_connected(conn, timeout: 5_000)
 
-      # Open stream WITHOUT handler (imperative API)
-      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
-      assert is_integer(stream_id)
+      # Open stream with default MessageHandler (sends messages to controlling process)
+      {:ok, handler1} = Connection.open_stream(conn, :bidirectional)
+      assert is_pid(handler1)
+      stream_id1 = Quichex.StreamHandler.stream_id(handler1)
 
-      # Use imperative API to send data
-      :ok = Connection.stream_send(conn, stream_id, "test data", fin: false)
+      # Send data on default handler
+      :ok = Quichex.StreamHandler.send_data(handler1, "test data", false)
 
-      # Open ANOTHER stream WITH handler
-      {:ok, handler_pid} =
+      # Open ANOTHER stream with custom NotifyHandler
+      {:ok, handler2} =
         Connection.open_stream(conn,
           type: :bidirectional,
           handler: NotifyHandler,
           handler_opts: [parent_pid: self()]
         )
 
-      assert is_pid(handler_pid)
+      assert is_pid(handler2)
       assert_receive {:handler_init, :outgoing, :bidirectional}, 1_000
+      stream_id2 = Quichex.StreamHandler.stream_id(handler2)
 
-      # Both should coexist - imperative stream and handler stream
-      assert is_integer(stream_id)
-      assert is_pid(handler_pid)
-      assert Process.alive?(handler_pid)
+      # Both handlers should coexist with different stream IDs
+      assert stream_id1 != stream_id2
+      assert Process.alive?(handler1)
+      assert Process.alive?(handler2)
 
-      # Imperative API can still send on its stream
-      :ok = Connection.stream_send(conn, stream_id, "more data", fin: true)
-
-      # Handler can send on its stream
-      :ok = Quichex.StreamHandler.send_data(handler_pid, "handler data", false)
+      # Both handlers can send on their streams
+      :ok = Quichex.StreamHandler.send_data(handler1, "more data", true)
+      :ok = Quichex.StreamHandler.send_data(handler2, "handler data", false)
 
       Connection.close(conn)
     end

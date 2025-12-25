@@ -113,6 +113,37 @@ defmodule Quichex.StreamHandler do
   end
 
   @doc """
+  Shuts down the stream in the specified direction.
+
+  ## Arguments
+
+    * `handler_pid` - StreamHandler process ID
+    * `direction` - `:read`, `:write`, or `:both`
+    * `opts` - Options (keyword list)
+
+  ## Options
+
+    * `:error_code` - QUIC error code (default: 0)
+
+  ## Returns
+
+    * `:ok` - Success
+    * `{:error, reason}` - On failure
+  """
+  @spec shutdown(pid(), :read | :write | :both, keyword()) :: :ok | {:error, term()}
+  def shutdown(handler_pid, direction, opts \\ []) when direction in [:read, :write, :both] do
+    GenServer.call(handler_pid, {:shutdown, direction, opts})
+  end
+
+  @doc """
+  Gets the stream ID for this handler.
+  """
+  @spec stream_id(pid()) :: non_neg_integer()
+  def stream_id(handler_pid) do
+    GenServer.call(handler_pid, :stream_id)
+  end
+
+  @doc """
   Gets handler statistics.
   """
   @spec stats(pid()) :: {:ok, map()} | {:error, term()}
@@ -213,6 +244,24 @@ defmodule Quichex.StreamHandler do
           {:reply, {:error, reason}, state}
       end
     end
+  end
+
+  @impl true
+  def handle_call({:shutdown, direction, opts}, _from, state) do
+    error_code = Keyword.get(opts, :error_code, 0)
+
+    case Quichex.Connection.stream_shutdown(state.conn_pid, state.stream_id, direction, error_code: error_code) do
+      :ok ->
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  @impl true
+  def handle_call(:stream_id, _from, state) do
+    {:reply, state.stream_id, state}
   end
 
   @impl true

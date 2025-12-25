@@ -136,7 +136,7 @@ defmodule Quichex.Connection do
   end
 
   @doc """
-  Opens a new stream.
+  Opens a new stream and spawns a StreamHandler for it.
 
   ## Arguments
 
@@ -146,50 +146,38 @@ defmodule Quichex.Connection do
   ## Options
 
     * `:type` - Stream type: `:bidirectional` or `:unidirectional` (default: `:bidirectional`)
-    * `:handler` - StreamHandler module to spawn for this stream (default: `nil`)
+    * `:handler` - StreamHandler module (default: `Quichex.StreamHandler.Message`)
     * `:handler_opts` - Options passed to handler's `init/4` callback (default: `[]`)
 
   ## Returns
 
-    * `{:ok, stream_id}` - Stream ID (imperative API, when no handler)
-    * `{:ok, handler_pid}` - Handler PID (when handler provided)
+    * `{:ok, handler_pid}` - PID of the spawned StreamHandler
     * `{:error, reason}` - On failure
 
   ## Examples
 
-      # Imperative API (backward compatible)
-      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
+      # Default MessageHandler (sends messages to controlling process)
+      {:ok, handler} = Connection.open_stream(conn, :bidirectional)
+      StreamHandler.send_data(handler, "Hello", fin: true)
+      receive do
+        {:quic_stream, ^handler, data} -> IO.puts(data)
+      end
 
-      # With handler (new StreamHandler API)
-      {:ok, handler_pid} = Connection.open_stream(conn,
+      # Custom handler
+      {:ok, handler} = Connection.open_stream(conn,
         type: :bidirectional,
         handler: MyApp.EchoHandler,
         handler_opts: [buffer_size: 4096]
       )
   """
   @spec open_stream(pid(), :bidirectional | :unidirectional | keyword()) ::
-          {:ok, non_neg_integer() | pid()} | {:error, term()}
+          {:ok, pid()} | {:error, term()}
   def open_stream(pid, opts) when is_list(opts) do
     :gen_statem.call(pid, {:open_stream, opts})
   end
 
   def open_stream(pid, type) when type in [:bidirectional, :unidirectional] do
     open_stream(pid, type: type)
-  end
-
-  @doc """
-  Sends data on a stream.
-
-  ## Options
-
-    * `:fin` - Whether to mark this as the final data on stream (default: false)
-
-  """
-  @spec stream_send(pid(), non_neg_integer(), binary(), keyword()) ::
-          :ok | {:error, term()}
-  def stream_send(pid, stream_id, data, opts \\ []) do
-    fin = Keyword.get(opts, :fin, false)
-    :gen_statem.call(pid, {:stream_send, stream_id, data, fin})
   end
 
   @doc """
@@ -462,15 +450,14 @@ defmodule Quichex.Connection do
 
     {stream_id, new_data} = StateMachine.open_stream(data, type)
 
-    # ALWAYS spawn StreamHandler (use Default if no handler provided)
-    handler_module = handler || Quichex.StreamHandler.Default
+    # ALWAYS spawn StreamHandler (use Message handler if no handler provided)
+    handler_module = handler || Quichex.StreamHandler.Message
 
-    # For DefaultStreamHandler, inject controlling_process and conn_pid
+    # For MessageHandler, inject controlling_process
     final_handler_opts =
-      if handler_module == Quichex.StreamHandler.Default do
+      if handler_module == Quichex.StreamHandler.Message do
         Keyword.merge(handler_opts,
-          controlling_process: new_data.controlling_process,
-          conn_pid: self()
+          controlling_process: new_data.controlling_process
         )
       else
         handler_opts
@@ -478,9 +465,8 @@ defmodule Quichex.Connection do
 
     case spawn_stream_handler(new_data, stream_id, :outgoing, type, handler_module, final_handler_opts) do
       {:ok, handler_pid, updated_data} ->
-        # Return handler_pid if user provided handler, stream_id otherwise (backward compat)
-        result = if handler, do: {:ok, handler_pid}, else: {:ok, stream_id}
-        {:keep_state, updated_data, [{:reply, from, result}]}
+        # Always return handler_pid
+        {:keep_state, updated_data, [{:reply, from, {:ok, handler_pid}}]}
 
       {:error, reason} ->
         {:keep_state, new_data, [{:reply, from, {:error, reason}}]}
@@ -490,24 +476,6 @@ defmodule Quichex.Connection do
   # Backward compatibility: handle old {:open_stream, type} format
   def connected({:call, from}, {:open_stream, type}, data) when is_atom(type) do
     connected({:call, from}, {:open_stream, [type: type]}, data)
-  end
-
-  def connected({:call, from}, {:stream_send, stream_id, data_bytes, fin}, state) do
-    # Route through StreamHandler (every stream has one)
-    case Map.get(state.stream_handlers, stream_id) do
-      nil ->
-        {:keep_state_and_data, [{:reply, from, {:error, :stream_not_found}}]}
-
-      handler_pid ->
-        # Send via handler (all mutations go through stream process)
-        case Quichex.StreamHandler.send_data(handler_pid, data_bytes, fin) do
-          :ok ->
-            {:keep_state_and_data, [{:reply, from, :ok}]}
-
-          {:error, reason} ->
-            {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
-        end
-    end
   end
 
   def connected({:call, from}, :readable_streams, data) do
@@ -744,16 +712,15 @@ defmodule Quichex.Connection do
     Enum.each(actions, fn action ->
       case action do
         {:spawn_stream_handler, stream_id, direction, stream_type, initial_data, initial_fin} ->
-          # ALWAYS spawn handler (use DefaultStreamHandler if no user handler configured)
+          # ALWAYS spawn handler (use MessageHandler if no user handler configured)
           if data.stream_handler_sup do
-            handler_module = data.stream_handler || Quichex.StreamHandler.Default
+            handler_module = data.stream_handler || Quichex.StreamHandler.Message
 
-            # For DefaultStreamHandler, inject controlling_process and conn_pid
+            # For MessageHandler, inject controlling_process
             final_handler_opts =
-              if handler_module == Quichex.StreamHandler.Default do
+              if handler_module == Quichex.StreamHandler.Message do
                 Keyword.merge(data.stream_handler_opts || [],
-                  controlling_process: data.controlling_process,
-                  conn_pid: self()
+                  controlling_process: data.controlling_process
                 )
               else
                 data.stream_handler_opts || []
