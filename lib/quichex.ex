@@ -27,4 +27,68 @@ defmodule Quichex do
   """
   @spec version() :: String.t()
   def version, do: @version
+
+  @doc """
+  Starts a new QUIC connection under supervision.
+
+  This is the recommended way to create connections. The connection will be
+  properly supervised and all resources will be cleaned up when it terminates.
+
+  ## Options
+
+  Same as `Quichex.Connection.connect/1`, plus:
+
+    * `:max_stream_handlers` - Maximum concurrent stream handlers for this
+      connection (default: from application config)
+
+  ## Returns
+
+    * `{:ok, pid}` - Connection process PID
+    * `{:error, :connection_limit_reached}` - Max connections exceeded
+    * `{:error, reason}` - Other errors
+
+  ## Examples
+
+      config = Quichex.Config.new!()
+        |> Quichex.Config.set_application_protos(["http/1.1"])
+        |> Quichex.Config.verify_peer(false)
+
+      {:ok, conn} = Quichex.start_connection(
+        host: "localhost",
+        port: 4433,
+        config: config
+      )
+
+      # Connection is automatically supervised
+      Quichex.Connection.wait_connected(conn)
+
+  """
+  @spec start_connection(keyword()) :: {:ok, pid()} | {:error, term()}
+  def start_connection(opts) do
+    Quichex.ConnectionRegistry.start_connection(opts)
+  end
+
+  @doc """
+  Closes a supervised connection.
+
+  Alias for `Quichex.Connection.close/2`.
+
+  ## Arguments
+
+    * `conn_pid` - Connection process PID
+    * `opts` - Options (keyword list)
+
+  ## Options
+
+    * `:error_code` - QUIC error code (default: 0)
+    * `:reason` - Human-readable reason (default: "")
+
+  ## Returns
+
+    * `:ok` - Connection closed successfully
+  """
+  @spec close_connection(pid(), keyword()) :: :ok
+  def close_connection(conn_pid, opts \\ []) do
+    Quichex.Connection.close(conn_pid, opts)
+  end
 end

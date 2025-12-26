@@ -98,9 +98,9 @@ pub fn connection_recv(
     connection
         .recv(&mut buf, info)
         .map_err(|e| match e {
-            quiche::Error::Done => "done".to_string(),
-            _ => format!("Recv error: {}", quiche_error_to_string(e)),
-        })
+        quiche::Error::Done => "done".to_string(),
+        _ => format!("Recv error: {}", quiche_error_to_string(e)),
+    })
 }
 
 /// Generates a QUIC packet to send

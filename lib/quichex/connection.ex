@@ -33,6 +33,12 @@ defmodule Quichex.Connection do
   @doc """
   Starts a client QUIC connection to the specified host and port.
 
+  > #### Deprecation Notice {: .warning}
+  >
+  > This function starts a connection without supervision. For production use,
+  > prefer `Quichex.start_connection/1` which provides proper supervision and
+  > automatic resource cleanup.
+
   ## Options
 
     * `:host` - Server hostname (required)
@@ -221,8 +227,6 @@ defmodule Quichex.Connection do
 
   @impl true
   def init({:client, opts}) do
-    Process.flag(:trap_exit, true)
-
     # Validate required options
     with {:ok, host} <- Keyword.fetch(opts, :host),
          {:ok, port} <- Keyword.fetch(opts, :port),
@@ -263,11 +267,11 @@ defmodule Quichex.Connection do
     new_data = StateMachine.start_handshake(data)
     {actions, new_data} = State.take_actions(new_data)
 
-    # Execute actions
-    execute_actions(actions, new_data)
+    # Execute actions and get updated state
+    updated_data = execute_actions(actions, new_data)
 
     # Transition to handshaking
-    {:next_state, :handshaking, new_data}
+    {:next_state, :handshaking, updated_data}
   end
 
   # State: :handshaking
@@ -286,14 +290,14 @@ defmodule Quichex.Connection do
     new_data = StateMachine.process_packet(data, packet)
     {actions, new_data} = State.take_actions(new_data)
 
-    # Execute actions
-    execute_actions(actions, new_data)
+    # Execute actions and get updated state
+    updated_data = execute_actions(actions, new_data)
 
     # Check if we're now established
-    if new_data.established do
-      {:next_state, :connected, new_data}
+    if updated_data.established do
+      {:next_state, :connected, updated_data}
     else
-      {:keep_state, new_data}
+      {:keep_state, updated_data}
     end
   end
 
@@ -302,10 +306,10 @@ defmodule Quichex.Connection do
     new_data = StateMachine.handle_timeout(data)
     {actions, new_data} = State.take_actions(new_data)
 
-    # Execute actions
-    execute_actions(actions, new_data)
+    # Execute actions and get updated state
+    updated_data = execute_actions(actions, new_data)
 
-    {:keep_state, new_data}
+    {:keep_state, updated_data}
   end
 
   def handshaking({:call, from}, :wait_connected, data) do
@@ -358,19 +362,30 @@ defmodule Quichex.Connection do
     end
   end
 
+  # Ignore unexpected info messages during handshake
+  def handshaking(:info, _msg, _data) do
+    :keep_state_and_data
+  end
+
   def handshaking({:call, from}, _request, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :not_connected}}]}
   end
 
   # State: :connected
-  def connected(:enter, :handshaking, _data) do
+  def connected(:enter, :handshaking, data) do
     # Just entered connected state from handshaking
     Logger.info("Connection established")
-    :keep_state_and_data
+
+    # Ensure StreamHandlerSupervisor is available (safe to lookup now - initialization complete)
+    updated_data = ensure_stream_handler_sup(data)
+
+    {:keep_state, updated_data}
   end
 
-  def connected(:enter, _old_state, _data) do
-    :keep_state_and_data
+  def connected(:enter, _old_state, data) do
+    # Ensure StreamHandlerSupervisor is available for other transitions to :connected
+    updated_data = ensure_stream_handler_sup(data)
+    {:keep_state, updated_data}
   end
 
   def connected(:info, {:udp, socket, _ip, _port, packet}, %State{socket: socket} = data) do
@@ -378,14 +393,14 @@ defmodule Quichex.Connection do
     new_data = StateMachine.process_packet(data, packet)
     {actions, new_data} = State.take_actions(new_data)
 
-    # Execute actions
-    execute_actions(actions, new_data)
+    # Execute actions and get updated state
+    updated_data = execute_actions(actions, new_data)
 
     # Check if connection is still open
-    if new_data.closed do
-      {:next_state, :closed, new_data}
+    if updated_data.closed do
+      {:next_state, :closed, updated_data}
     else
-      {:keep_state, new_data}
+      {:keep_state, updated_data}
     end
   end
 
@@ -394,10 +409,10 @@ defmodule Quichex.Connection do
     new_data = StateMachine.handle_timeout(data)
     {actions, new_data} = State.take_actions(new_data)
 
-    # Execute actions
-    execute_actions(actions, new_data)
+    # Execute actions and get updated state
+    updated_data = execute_actions(actions, new_data)
 
-    {:keep_state, new_data}
+    {:keep_state, updated_data}
   end
 
   def connected(:info, {:stream_handler_sent, stream_id, bytes_written}, data) do
@@ -412,23 +427,11 @@ defmodule Quichex.Connection do
       |> State.update_stream(stream)
       |> StateMachine.generate_pending_packets()
 
-    # Execute actions (packet sends)
+    # Execute actions (packet sends) and get updated state
     {actions, new_data} = State.take_actions(new_data)
-    execute_actions(actions, new_data)
+    updated_data = execute_actions(actions, new_data)
 
-    {:keep_state, new_data}
-  end
-
-  def connected(:info, {:stream_handler_spawned, stream_id, handler_pid}, data) do
-    # Update state to track the spawned handler
-    Logger.debug("Stream handler spawned for incoming stream #{stream_id}: #{inspect(handler_pid)}")
-
-    new_data = %{
-      data
-      | stream_handlers: Map.put(data.stream_handlers, stream_id, handler_pid)
-    }
-
-    {:keep_state, new_data}
+    {:keep_state, updated_data}
   end
 
   def connected({:call, from}, :wait_connected, _data) do
@@ -493,9 +496,9 @@ defmodule Quichex.Connection do
     new_data = StateMachine.stream_shutdown(data, stream_id, direction, error_code)
     {actions, new_data} = State.take_actions(new_data)
 
-    execute_actions(actions, new_data)
+    updated_data = execute_actions(actions, new_data)
 
-    {:keep_state, new_data, [{:reply, from, :ok}]}
+    {:keep_state, updated_data, [{:reply, from, :ok}]}
   end
 
   def connected({:call, from}, {:close, opts}, data) do
@@ -605,7 +608,29 @@ defmodule Quichex.Connection do
     mode = Keyword.get(opts, :mode, :auto)
     stream_handler = Keyword.get(opts, :stream_handler)
     stream_handler_opts = Keyword.get(opts, :stream_handler_opts, [])
-    max_stream_handlers = Keyword.get(opts, :max_stream_handlers, 1000)
+    # Stream handler supervisor PID injected by ConnectionSupervisor
+    stream_handler_sup_opt = Keyword.get(opts, :__stream_handler_sup__)
+
+    # Get controlling process (injected by ConnectionRegistry for supervised connections)
+    controlling_process =
+      case Keyword.get(opts, :controlling_process) do
+        pid when is_pid(pid) ->
+          # Use explicit controlling_process from opts (supervised mode)
+          pid
+
+        nil ->
+          # Fallback for unsupervised connections (backward compatibility)
+          case Process.info(self(), :links) do
+            {:links, [parent | _]} when is_pid(parent) ->
+              parent
+
+            _ ->
+              case Process.get(:"$callers") do
+                [caller | _] -> caller
+                _ -> Process.group_leader()
+              end
+          end
+      end
 
     # Resolve hostname to IP
     peer_addr = resolve_address(host, port)
@@ -617,20 +642,6 @@ defmodule Quichex.Connection do
 
     # Generate random connection ID (16 bytes)
     scid = :crypto.strong_rand_bytes(16)
-
-    # Get the parent process (the one that called connect/1)
-    parent_pid =
-      case Process.info(self(), :links) do
-        {:links, [parent | _]} when is_pid(parent) ->
-          parent
-
-        _ ->
-          # Fallback: try $callers
-          case Process.get(:"$callers") do
-            [caller | _] -> caller
-            _ -> Process.group_leader()
-          end
-      end
 
     # Create QUIC connection
     local_addr_arg = format_address(local_addr)
@@ -644,12 +655,9 @@ defmodule Quichex.Connection do
            config.resource
          ) do
       {:ok, conn_resource} ->
-        # Start StreamHandlerSupervisor for this connection
-        {:ok, stream_handler_sup} =
-          DynamicSupervisor.start_link(
-            strategy: :one_for_one,
-            max_children: max_stream_handlers
-          )
+        # Get StreamHandlerSupervisor PID (from opts, or lookup lazily when needed)
+        # Don't look up during init to avoid deadlock with parent supervisor
+        stream_handler_sup = stream_handler_sup_opt
 
         # Create state
         state =
@@ -662,13 +670,52 @@ defmodule Quichex.Connection do
             stream_handler_sup: stream_handler_sup
           )
 
-        state = %{state | controlling_process: parent_pid, scid: scid}
+        state = %{state | controlling_process: controlling_process, scid: scid}
 
         {:ok, state}
 
       {:error, reason} ->
         :gen_udp.close(socket)
         {:error, reason}
+    end
+  end
+
+  # Ensure stream_handler_sup is available (lookup if needed)
+  defp ensure_stream_handler_sup(data) do
+    if data.stream_handler_sup do
+      data
+    else
+      sup_pid = get_stream_handler_supervisor()
+      %{data | stream_handler_sup: sup_pid}
+    end
+  end
+
+  defp get_stream_handler_supervisor do
+    # Get our parent supervisor (ConnectionSupervisor) from ancestors
+    case Process.get(:"$ancestors") do
+      [parent | _] when is_pid(parent) ->
+        # Look up StreamHandlerSupervisor from parent's children
+        # Retry a few times to handle supervisor initialization race condition
+        get_stream_handler_supervisor_retry(parent, 10)
+
+      _ ->
+        raise "Connection must be started under supervision (no parent found in ancestors)"
+    end
+  end
+
+  defp get_stream_handler_supervisor_retry(_parent, 0) do
+    raise "StreamHandlerSupervisor not found after retries - Connection must be started under ConnectionSupervisor"
+  end
+
+  defp get_stream_handler_supervisor_retry(parent, retries_left) do
+    case Quichex.ConnectionSupervisor.stream_handler_supervisor_pid(parent) do
+      {:ok, sup_pid} ->
+        sup_pid
+
+      {:error, :not_found} ->
+        # Supervisor might still be initializing, wait a bit and retry
+        Process.sleep(50)
+        get_stream_handler_supervisor_retry(parent, retries_left - 1)
     end
   end
 
@@ -709,25 +756,26 @@ defmodule Quichex.Connection do
       conn_resource: data.conn_resource
     }
 
-    Enum.each(actions, fn action ->
+    # Reduce over actions, updating state and performing side effects
+    Enum.reduce(actions, data, fn action, acc_data ->
       case action do
         {:spawn_stream_handler, stream_id, direction, stream_type, initial_data, initial_fin} ->
           # ALWAYS spawn handler (use MessageHandler if no user handler configured)
-          if data.stream_handler_sup do
-            handler_module = data.stream_handler || Quichex.StreamHandler.Message
+          if acc_data.stream_handler_sup do
+            handler_module = acc_data.stream_handler || Quichex.StreamHandler.Message
 
             # For MessageHandler, inject controlling_process
             final_handler_opts =
               if handler_module == Quichex.StreamHandler.Message do
-                Keyword.merge(data.stream_handler_opts || [],
-                  controlling_process: data.controlling_process
+                Keyword.merge(acc_data.stream_handler_opts || [],
+                  controlling_process: acc_data.controlling_process
                 )
               else
-                data.stream_handler_opts || []
+                acc_data.stream_handler_opts || []
               end
 
             handler_init_opts = [
-              conn_resource: data.conn_resource,
+              conn_resource: acc_data.conn_resource,
               conn_pid: self(),
               stream_id: stream_id,
               direction: direction,
@@ -737,37 +785,38 @@ defmodule Quichex.Connection do
             ]
 
             case DynamicSupervisor.start_child(
-                   data.stream_handler_sup,
+                   acc_data.stream_handler_sup,
                    {Quichex.StreamHandler, handler_init_opts}
                  ) do
               {:ok, handler_pid} ->
                 # Send initial data to handler immediately
                 GenServer.cast(handler_pid, {:stream_data, initial_data, initial_fin})
 
-                # Send message to self to update state
-                send(self(), {:stream_handler_spawned, stream_id, handler_pid})
-                :ok
+                # Update state IMMEDIATELY - no message passing!
+                put_in(acc_data.stream_handlers[stream_id], handler_pid)
 
               {:error, reason} ->
                 Logger.warning(
                   "Failed to spawn incoming stream handler for stream #{stream_id}: #{inspect(reason)}"
                 )
 
-                :ok
+                acc_data
             end
+          else
+            acc_data
           end
 
         {:route_to_handler, handler_pid, data_bytes, fin} ->
           # Send data to handler process
           GenServer.cast(handler_pid, {:stream_data, data_bytes, fin})
+          acc_data
 
         _ ->
           # Delegate other actions to Action module
           Action.execute(action, context)
+          acc_data
       end
     end)
-
-    :ok
   end
 
   defp spawn_stream_handler(state, stream_id, direction, stream_type, handler_module, handler_opts) do

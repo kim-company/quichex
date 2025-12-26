@@ -86,6 +86,7 @@ defmodule Quichex.StateMachine do
       {:ok, _} ->
         state
         |> generate_pending_packets()
+        |> process_readable_streams()  # Check for readable streams after timeout!
         |> schedule_timeout()
 
       {:error, reason} ->

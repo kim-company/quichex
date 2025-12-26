@@ -8,8 +8,8 @@ defmodule Quichex.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      # Starts a worker by calling: Quichex.Worker.start_link(arg)
-      # {Quichex.Worker, arg}
+      # ConnectionRegistry manages all QUIC connections
+      {Quichex.ConnectionRegistry, []}
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html

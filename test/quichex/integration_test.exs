@@ -21,7 +21,7 @@ defmodule Quichex.IntegrationTest do
 
       # Connect to cloudflare-quic.com
       {:ok, conn} =
-        Connection.connect(
+        Quichex.start_connection(
           host: "cloudflare-quic.com",
           port: 443,
           config: config
@@ -60,7 +60,7 @@ defmodule Quichex.IntegrationTest do
       assert :ok = Quichex.StreamHandler.send_data(handler3, "Stream 3 data", true)
 
       # Clean up
-      Connection.close(conn)
+      Quichex.close_connection(conn)
       refute Connection.is_established?(conn)
     end
 
@@ -71,7 +71,7 @@ defmodule Quichex.IntegrationTest do
         |> Config.verify_peer(false)
 
       {:ok, conn} =
-        Connection.connect(
+        Quichex.start_connection(
           host: "cloudflare-quic.com",
           port: 443,
           config: config,
@@ -106,7 +106,7 @@ defmodule Quichex.IntegrationTest do
         2_000 -> :ok  # No response is ok
       end
 
-      Connection.close(conn)
+      Quichex.close_connection(conn)
     end
 
     test "multiple concurrent streams work correctly" do
@@ -117,7 +117,7 @@ defmodule Quichex.IntegrationTest do
         |> Config.verify_peer(false)
 
       {:ok, conn} =
-        Connection.connect(
+        Quichex.start_connection(
           host: "cloudflare-quic.com",
           port: 443,
           config: config
@@ -143,7 +143,7 @@ defmodule Quichex.IntegrationTest do
       expected = [0, 4, 8, 12, 16]
       assert stream_ids == expected
 
-      Connection.close(conn)
+      Quichex.close_connection(conn)
     end
 
     test "stream shutdown works correctly" do
@@ -153,7 +153,7 @@ defmodule Quichex.IntegrationTest do
         |> Config.verify_peer(false)
 
       {:ok, conn} =
-        Connection.connect(
+        Quichex.start_connection(
           host: "cloudflare-quic.com",
           port: 443,
           config: config
@@ -175,7 +175,7 @@ defmodule Quichex.IntegrationTest do
         {:error, _} -> :ok  # Expected if shutdown worked
       end
 
-      Connection.close(conn)
+      Quichex.close_connection(conn)
     end
   end
 end

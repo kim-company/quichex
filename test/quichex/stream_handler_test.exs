@@ -103,7 +103,7 @@ defmodule Quichex.StreamHandlerTest do
     test "handler can be spawned for outgoing stream", %{config: config} do
       # Connect without default stream handler
       {:ok, conn} =
-        Connection.connect(
+        Quichex.start_connection(
           host: "127.0.0.1",
           port: 4433,
           config: config,
@@ -128,12 +128,12 @@ defmodule Quichex.StreamHandlerTest do
       assert Process.alive?(handler_pid)
 
       # Cleanup
-      Connection.close(conn)
+      Quichex.close_connection(conn)
     end
 
     test "handler receives data via handle_data callback", %{config: config} do
       {:ok, conn} =
-        Connection.connect(
+        Quichex.start_connection(
           host: "127.0.0.1",
           port: 4433,
           config: config,
@@ -156,12 +156,12 @@ defmodule Quichex.StreamHandlerTest do
       # test receiving data from the server without server-side stream opening support.
       # For now, we verify the handler spawns correctly.
 
-      Connection.close(conn)
+      Quichex.close_connection(conn)
     end
 
     test "handler can send data using actions", %{config: config} do
       {:ok, conn} =
-        Connection.connect(
+        Quichex.start_connection(
           host: "127.0.0.1",
           port: 4433,
           config: config,
@@ -186,12 +186,12 @@ defmodule Quichex.StreamHandlerTest do
       # Verify handler is still alive after send
       assert Process.alive?(handler_pid)
 
-      Connection.close(conn)
+      Quichex.close_connection(conn)
     end
 
     test "handler cleanup on connection close", %{config: config} do
       {:ok, conn} =
-        Connection.connect(
+        Quichex.start_connection(
           host: "127.0.0.1",
           port: 4433,
           config: config,
@@ -213,7 +213,7 @@ defmodule Quichex.StreamHandlerTest do
       ref = Process.monitor(handler_pid)
 
       # Close connection
-      Connection.close(conn)
+      Quichex.close_connection(conn)
 
       # Handler should terminate
       assert_receive {:DOWN, ^ref, :process, ^handler_pid, _reason}, 2_000
@@ -223,7 +223,7 @@ defmodule Quichex.StreamHandlerTest do
   describe "StreamHandler.send_data/3" do
     test "can send data synchronously", %{config: config} do
       {:ok, conn} =
-        Connection.connect(
+        Quichex.start_connection(
           host: "127.0.0.1",
           port: 4433,
           config: config,
@@ -250,12 +250,12 @@ defmodule Quichex.StreamHandlerTest do
       assert {:error, :stream_already_finished} =
                Quichex.StreamHandler.send_data(handler_pid, "after_fin", false)
 
-      Connection.close(conn)
+      Quichex.close_connection(conn)
     end
 
     test "returns error on invalid data", %{config: config} do
       {:ok, conn} =
-        Connection.connect(
+        Quichex.start_connection(
           host: "127.0.0.1",
           port: 4433,
           config: config,
@@ -276,14 +276,14 @@ defmodule Quichex.StreamHandlerTest do
       # Sending non-binary data should fail (caught by guards)
       assert catch_error(Quichex.StreamHandler.send_data(handler_pid, 123, false))
 
-      Connection.close(conn)
+      Quichex.close_connection(conn)
     end
   end
 
   describe "StreamHandler.stats/1" do
     test "returns handler statistics", %{config: config} do
       {:ok, conn} =
-        Connection.connect(
+        Quichex.start_connection(
           host: "127.0.0.1",
           port: 4433,
           config: config,
@@ -327,14 +327,14 @@ defmodule Quichex.StreamHandlerTest do
       assert stats3.bytes_sent == 14
       assert stats3.fin_sent == true
 
-      Connection.close(conn)
+      Quichex.close_connection(conn)
     end
   end
 
   describe "backward compatibility" do
     test "multiple handler types can coexist", %{config: config} do
       {:ok, conn} =
-        Connection.connect(
+        Quichex.start_connection(
           host: "127.0.0.1",
           port: 4433,
           config: config
@@ -371,7 +371,7 @@ defmodule Quichex.StreamHandlerTest do
       :ok = Quichex.StreamHandler.send_data(handler1, "more data", true)
       :ok = Quichex.StreamHandler.send_data(handler2, "handler data", false)
 
-      Connection.close(conn)
+      Quichex.close_connection(conn)
     end
   end
 end

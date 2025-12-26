@@ -37,7 +37,7 @@ Logger.info("1. Connecting to 127.0.0.1:4433...")
 Logger.info("   (Make sure quiche-server is running!)")
 
 # Connect
-case Quichex.Connection.connect(
+case Quichex.Quichex.start_connection(
        host: "127.0.0.1",
        port: 4433,
        config: config
@@ -131,13 +131,13 @@ case Quichex.Connection.connect(
 
         # Close connection
         Logger.info("\n6. Closing connection...")
-        :ok = Quichex.Connection.close(conn)
+        :ok = Quichex.Quichex.close_connection(conn)
         Logger.info("   ✓ Connection closed")
 
       {:error, reason} ->
         Logger.error("   ✗ Handshake failed: #{inspect(reason)}")
         Logger.error("   Make sure quiche-server is running!")
-        Quichex.Connection.close(conn)
+        Quichex.Quichex.close_connection(conn)
     end
 
   {:error, reason} ->
