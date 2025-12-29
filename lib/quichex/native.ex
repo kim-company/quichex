@@ -32,7 +32,7 @@ defmodule Quichex.Native do
   def config_grease(_config, _grease), do: error()
 
   # Connection NIFs
-  def connection_new_client(_scid, _server_name, _local_addr, _peer_addr, _config), do: error()
+  def connection_new_client(_scid, _server_name, _local_addr, _peer_addr, _config, _stream_recv_buffer_size), do: error()
   def connection_recv(_conn, _packet, _recv_info), do: error()
   def connection_send(_conn), do: error()
   def connection_timeout(_conn), do: error()

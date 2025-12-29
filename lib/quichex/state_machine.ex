@@ -201,79 +201,50 @@ defmodule Quichex.StateMachine do
 
   @doc false
   defp process_readable_streams(%State{} = state) do
-    # Always get readable streams and process them immediately
+    # Get list of readable streams and send notifications to controlling process
     case Native.connection_readable_streams(state.conn_resource) do
       {:ok, readable_streams} ->
         state = %{state | readable_streams: readable_streams}
-        # Always read and route to handlers (immediate delivery)
-        Enum.reduce(readable_streams, state, &process_one_stream/2)
 
-      {:error, _reason} ->
-        state
-    end
-  end
+        # Send notification for each readable stream
+        actions =
+          Enum.map(readable_streams, fn stream_id ->
+            # Check if this is a new stream (never seen before)
+            is_new_stream = not Map.has_key?(state.streams, stream_id)
 
-  @doc false
-  defp process_one_stream(stream_id, %State{} = state) do
-    case Native.connection_stream_recv(state.conn_resource, stream_id, 65535) do
-      {:ok, {data, fin}} when byte_size(data) > 0 or fin ->
-        Logger.debug("Stream #{stream_id}: received #{byte_size(data)} bytes, fin=#{fin}")
+            if is_new_stream do
+              # Determine direction based on stream ID (odd = peer-initiated)
+              direction = if rem(stream_id, 2) == 1, do: :incoming, else: :outgoing
+              stream_type = :bidirectional  # TODO: detect uni vs bidi
 
-        # Check if this is a new incoming stream that needs a handler
-        is_new_stream = not Map.has_key?(state.streams, stream_id)
-        has_handler = Map.has_key?(state.stream_handlers, stream_id)
-        # ALWAYS spawn handler for new streams (Connection will use MessageHandler if no user handler)
-        should_spawn_handler = is_new_stream and not has_handler
+              # Create stream state (but don't read data yet)
+              {_stream, _new_state} = State.get_or_create_stream(state, stream_id, stream_type)
 
-        # Update stream state
-        {stream, state} = State.get_or_create_stream(state, stream_id, :bidirectional)
+              # Notify about new stream
+              {:send_to_app, state.controlling_process,
+               {:quic_stream_opened, self(), stream_id, direction, stream_type}}
+            else
+              # Existing stream - just notify readable
+              {:send_to_app, state.controlling_process,
+               {:quic_stream_readable, self(), stream_id}}
+            end
+          end)
 
-        stream =
-          stream
-          |> StreamState.add_bytes_received(byte_size(data))
-          |> (fn s -> if fin, do: StreamState.mark_fin_received(s), else: s end).()
-
-        state = State.update_stream(state, stream)
-
-        # If this is a new incoming stream, spawn handler with initial data
+        # Update state with new streams if any
         state =
-          if should_spawn_handler do
-            # Determine direction based on stream ID (odd = peer-initiated)
-            direction = if rem(stream_id, 2) == 1, do: :incoming, else: :outgoing
-            stream_type = :bidirectional  # TODO: detect uni vs bidi
+          Enum.reduce(readable_streams, state, fn stream_id, acc ->
+            if not Map.has_key?(acc.streams, stream_id) do
+              _direction = if rem(stream_id, 2) == 1, do: :incoming, else: :outgoing
+              {_stream, new_state} = State.get_or_create_stream(acc, stream_id, :bidirectional)
+              new_state
+            else
+              acc
+            end
+          end)
 
-            # Include initial data in spawn action
-            spawn_action = {:spawn_stream_handler, stream_id, direction, stream_type, data, fin}
-            State.add_action(state, spawn_action)
-          else
-            state
-          end
-
-        # Route data based on whether stream has a handler
-        # Every stream should have a handler (MessageHandler if no user handler)
-        cond do
-          # Just spawned handler - data already included in spawn action
-          should_spawn_handler ->
-            state
-
-          # Stream has a handler - route data to it
-          has_handler ->
-            handler_pid = Map.get(state.stream_handlers, stream_id)
-            action = {:route_to_handler, handler_pid, data, fin}
-            State.add_action(state, action)
-
-          true ->
-            # No handler - shouldn't happen if we always spawn handlers
-            Logger.warning("Received data for stream #{stream_id} without handler - dropping data")
-            state
-        end
-
-      {:ok, {_data, _fin}} ->
-        # Empty data, ignore
-        state
+        State.add_actions(state, actions)
 
       {:error, _reason} ->
-        # Could be "done" or other error - stop reading this stream
         state
     end
   end

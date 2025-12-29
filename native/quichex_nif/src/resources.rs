@@ -9,6 +9,7 @@ pub struct ConfigResource {
 /// Wrapper for quiche::Connection with thread-safe reference counting
 pub struct ConnectionResource {
     pub inner: Arc<Mutex<quiche::Connection>>,
+    pub stream_recv_buffer_size: usize,
 }
 
 /// Load resources - called when NIF library is loaded

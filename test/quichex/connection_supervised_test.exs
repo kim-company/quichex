@@ -29,13 +29,12 @@ defmodule Quichex.ConnectionSupervisedTest do
       # Parent should be a supervisor
       children = Supervisor.which_children(parent)
 
-      # Should have 2 children: Connection + StreamHandlerSupervisor
-      assert length(children) == 2
+      # Should have 1 child: Connection only (simplified architecture)
+      assert length(children) == 1
 
-      # Verify children are the right types
-      ids = Enum.map(children, fn {id, _pid, _type, _modules} -> id end)
-      assert Quichex.Connection in ids
-      assert Quichex.StreamHandlerSupervisor in ids
+      # Verify child is the Connection
+      [{id, _conn_pid, :worker, _modules}] = children
+      assert id == Quichex.Connection
 
       Quichex.close_connection(conn)
     end
@@ -71,7 +70,7 @@ defmodule Quichex.ConnectionSupervisedTest do
       :ok
     end
 
-    test "stream handlers work under supervised connection" do
+    test "streams work under supervised connection" do
       config = Config.new!() |> Config.verify_peer(false)
 
       {:ok, conn} =
@@ -85,10 +84,10 @@ defmodule Quichex.ConnectionSupervisedTest do
       try do
         :ok = Connection.wait_connected(conn, timeout: 5_000)
 
-        # Open a stream
-        {:ok, handler} = Connection.open_stream(conn, :bidirectional)
-        assert is_pid(handler)
-        assert Process.alive?(handler)
+        # Open a stream (returns stream_id now, not handler PID)
+        {:ok, stream_id} = Connection.open_stream(conn, type: :bidirectional)
+        assert is_integer(stream_id)
+        assert stream_id == 0  # First bidi stream
 
         Quichex.close_connection(conn)
       catch

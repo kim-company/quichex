@@ -13,6 +13,7 @@ pub fn connection_new_client(
     local_addr: Binary,  // 6 bytes for IPv4 (4 IP + 2 port) or 18 bytes for IPv6 (16 IP + 2 port)
     peer_addr: Binary,
     config: ResourceArc<ConfigResource>,
+    stream_recv_buffer_size: usize,  // Buffer size for stream reads
 ) -> Result<ResourceArc<ConnectionResource>, String> {
     let cfg = config
         .inner
@@ -43,6 +44,7 @@ pub fn connection_new_client(
 
     Ok(ResourceArc::new(ConnectionResource {
         inner: Arc::new(Mutex::new(conn)),
+        stream_recv_buffer_size,
     }))
 }
 
@@ -92,7 +94,9 @@ pub fn connection_recv(
 
     let info = recv_info.into_quiche();
 
-    // Need to copy packet data to mutable buffer for quiche
+    // TODO: quiche::Connection::recv() requires &mut [u8], but likely doesn't actually
+    // mutate the buffer (it only reads the incoming packet). We could potentially avoid
+    // this copy with unsafe casting, but keeping it safe for now.
     let mut buf = packet.as_slice().to_vec();
 
     connection

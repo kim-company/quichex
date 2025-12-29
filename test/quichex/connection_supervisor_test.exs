@@ -6,7 +6,7 @@ defmodule Quichex.ConnectionSupervisorTest do
   @moduletag :integration
 
   describe "ConnectionSupervisor" do
-    test "starts with Connection and StreamHandlerSupervisor children" do
+    test "starts with Connection child" do
       config = Config.new!() |> Config.verify_peer(false)
 
       opts = [
@@ -17,28 +17,15 @@ defmodule Quichex.ConnectionSupervisorTest do
 
       {:ok, sup_pid} = ConnectionSupervisor.start_link(opts)
 
-      # Should have 2 children
+      # Should have 1 child (Connection only)
       children = Supervisor.which_children(sup_pid)
-      assert length(children) == 2
+      assert length(children) == 1
 
-      # Find children by id
-      ids = Enum.map(children, fn {id, _pid, _type, _modules} -> id end)
-      assert Quichex.Connection in ids
-      assert Quichex.StreamHandlerSupervisor in ids
-
-      # Verify child types
-      connection_child =
-        Enum.find(children, fn {id, _pid, _type, _modules} ->
-          id == Quichex.Connection
-        end)
-
-      handler_sup_child =
-        Enum.find(children, fn {id, _pid, _type, _modules} ->
-          id == Quichex.StreamHandlerSupervisor
-        end)
-
-      {_id, _conn_pid, :worker, _modules} = connection_child
-      {_id, _sup_pid, :supervisor, _modules} = handler_sup_child
+      # Verify it's the Connection child
+      [{id, conn_pid, :worker, _modules}] = children
+      assert id == Quichex.Connection
+      assert is_pid(conn_pid)
+      assert Process.alive?(conn_pid)
 
       # Clean up
       Process.exit(sup_pid, :shutdown)
@@ -64,26 +51,6 @@ defmodule Quichex.ConnectionSupervisorTest do
       Process.exit(sup_pid, :shutdown)
     end
 
-    test "stream_handler_supervisor_pid/1 returns StreamHandlerSupervisor PID" do
-      config = Config.new!() |> Config.verify_peer(false)
-
-      opts = [
-        host: "127.0.0.1",
-        port: 4433,
-        config: config
-      ]
-
-      {:ok, sup_pid} = ConnectionSupervisor.start_link(opts)
-
-      {:ok, handler_sup_pid} = ConnectionSupervisor.stream_handler_supervisor_pid(sup_pid)
-
-      assert is_pid(handler_sup_pid)
-      assert Process.alive?(handler_sup_pid)
-
-      # Clean up
-      Process.exit(sup_pid, :shutdown)
-    end
-
     test "shuts down when Connection dies (auto_shutdown: :any_significant)" do
       config = Config.new!() |> Config.verify_peer(false)
 
@@ -103,11 +70,12 @@ defmodule Quichex.ConnectionSupervisorTest do
       end)
 
       # Wait for supervisor to start
-      sup_pid = receive do
-        {:supervisor_started, pid} -> pid
-      after
-        2000 -> raise "Supervisor didn't start"
-      end
+      sup_pid =
+        receive do
+          {:supervisor_started, pid} -> pid
+        after
+          2000 -> raise "Supervisor didn't start"
+        end
 
       {:ok, conn_pid} = ConnectionSupervisor.connection_pid(sup_pid)
 
@@ -121,23 +89,24 @@ defmodule Quichex.ConnectionSupervisorTest do
       assert_receive {:DOWN, ^ref, :process, ^sup_pid, _reason}, 2000
     end
 
-    test "respects max_stream_handlers configuration" do
-      config = Config.new!() |> Config.verify_peer(false)
+    test "passes configuration options to Connection" do
+      config =
+        Config.new!()
+        |> Config.verify_peer(false)
+        |> Config.set_initial_max_data(1_000_000)
 
-      # Override max_stream_handlers
       opts = [
         host: "127.0.0.1",
         port: 4433,
         config: config,
-        max_stream_handlers: 10
+        stream_recv_buffer_size: 32768
       ]
 
       {:ok, sup_pid} = ConnectionSupervisor.start_link(opts)
-      {:ok, handler_sup_pid} = ConnectionSupervisor.stream_handler_supervisor_pid(sup_pid)
+      {:ok, conn_pid} = ConnectionSupervisor.connection_pid(sup_pid)
 
-      # Get max_children from DynamicSupervisor (not directly accessible, but we can verify it works)
-      # This is more of an integration test - just verify the supervisor started
-      assert Process.alive?(handler_sup_pid)
+      # Connection should be alive and configured
+      assert Process.alive?(conn_pid)
 
       # Clean up
       Process.exit(sup_pid, :shutdown)

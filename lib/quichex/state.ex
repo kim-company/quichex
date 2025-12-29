@@ -33,7 +33,6 @@ defmodule Quichex.State do
 
           # Process management
           controlling_process: pid() | nil,
-          stream_workers: %{StreamState.stream_id() => pid()},
           waiters: [:gen_statem.from()],
 
           # Connection lifecycle
@@ -47,12 +46,6 @@ defmodule Quichex.State do
           streams: %{StreamState.stream_id() => StreamState.t()},
           readable_streams: [StreamState.stream_id()],
 
-          # Stream handler support (Phase 1)
-          stream_handler: module() | nil,
-          stream_handler_opts: keyword(),
-          stream_handler_sup: pid() | nil,
-          stream_handlers: %{StreamState.stream_id() => pid()},
-
           # Actions queue
           pending_actions: [Action.t()],
 
@@ -61,8 +54,7 @@ defmodule Quichex.State do
 
           # Configuration
           mode: workload_mode(),
-          stream_worker_threshold: non_neg_integer(),
-          max_stream_workers: non_neg_integer(),
+          stream_recv_buffer_size: non_neg_integer(),
 
           # Statistics
           packets_sent: non_neg_integer(),
@@ -79,7 +71,6 @@ defmodule Quichex.State do
             scid: nil,
             server_name: nil,
             controlling_process: nil,
-            stream_workers: %{},
             waiters: [],
             established: false,
             closed: false,
@@ -88,15 +79,10 @@ defmodule Quichex.State do
             next_uni_stream: 0,
             streams: %{},
             readable_streams: [],
-            stream_handler: nil,
-            stream_handler_opts: [],
-            stream_handler_sup: nil,
-            stream_handlers: %{},
             pending_actions: [],
             timeout_ref: nil,
             mode: :auto,
-            stream_worker_threshold: 65_536,
-            max_stream_workers: 100,
+            stream_recv_buffer_size: 16384,
             packets_sent: 0,
             packets_received: 0,
             bytes_sent: 0,
@@ -131,11 +117,7 @@ defmodule Quichex.State do
       config: config,
       server_name: Keyword.get(opts, :server_name),
       mode: Keyword.get(opts, :mode, :auto),
-      stream_worker_threshold: Keyword.get(opts, :stream_worker_threshold, 65_536),
-      max_stream_workers: Keyword.get(opts, :max_stream_workers, 100),
-      stream_handler: Keyword.get(opts, :stream_handler),
-      stream_handler_opts: Keyword.get(opts, :stream_handler_opts, []),
-      stream_handler_sup: Keyword.get(opts, :stream_handler_sup)
+      stream_recv_buffer_size: Keyword.get(opts, :stream_recv_buffer_size, 16384)
     }
   end
 

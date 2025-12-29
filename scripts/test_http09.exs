@@ -5,22 +5,32 @@
 # 3. Receive data
 # 4. Keep connection open
 
-alias Quichex.{Config, Connection, StreamHandler}
+alias Quichex.{Config, Connection}
 
 defmodule HTTPTest do
-  def receive_all_data(handler, acc, timeout) do
+  def receive_all_data(conn, stream_id, acc, timeout) do
     receive do
-      {:quic_stream, ^handler, data} ->
-        # Got data, keep receiving
-        receive_all_data(handler, [acc, data], 1000)
+      {:quic_stream_readable, ^conn, ^stream_id} ->
+        # Stream readable, read data
+        case Connection.stream_recv(conn, stream_id) do
+          {:ok, {data, fin}} ->
+            new_acc = [acc, data]
+            if fin do
+              # Stream closed, return accumulated data
+              new_acc
+            else
+              # Keep receiving
+              receive_all_data(conn, stream_id, new_acc, 1000)
+            end
 
-      {:quic_stream_fin, ^handler} ->
-        # Stream closed, return accumulated data
-        acc
+          {:error, _reason} ->
+            # Error reading, return what we have
+            acc
+        end
 
       other ->
         IO.puts("Unexpected message: #{inspect(other)}")
-        receive_all_data(handler, acc, timeout)
+        receive_all_data(conn, stream_id, acc, timeout)
     after
       timeout ->
         # Timeout, return what we have
@@ -39,12 +49,11 @@ config = Config.new!()
 
 IO.puts("Connecting to localhost:4433...")
 
-# Connect (supervised with active mode)
+# Connect (supervised, socket always active)
 {:ok, conn} = Quichex.start_connection(
   host: "127.0.0.1",
   port: 4433,
-  config: config,
-  active: true
+  config: config
 )
 
 IO.puts("Connection started: #{inspect(conn)}")
@@ -56,22 +65,21 @@ case Connection.wait_connected(conn, timeout: 5_000) do
 
     # Open a bidirectional stream
     IO.puts("Opening stream...")
-    {:ok, handler} = Connection.open_stream(conn, :bidirectional)
-    IO.puts("✅ Stream opened: #{inspect(handler)}")
+    {:ok, stream_id} = Connection.open_stream(conn, type: :bidirectional)
+    IO.puts("✅ Stream opened: stream_id=#{stream_id}")
 
     # Send HTTP/0.9 request
     request = "GET /index.html\r\n"
     IO.puts("Sending request: #{inspect(request)}")
-    :ok = StreamHandler.send_data(handler, request, true)
-    IO.puts("✅ Request sent")
+    {:ok, bytes_written} = Connection.stream_send(conn, stream_id, request, fin: true)
+    IO.puts("✅ Request sent (#{bytes_written} bytes)")
 
     # Receive response
     IO.puts("Waiting for response...")
-    IO.puts("My PID: #{inspect(self())}")
-    IO.puts("Handler PID: #{inspect(handler)}")
+    IO.puts("Controlling process PID: #{inspect(self())}")
 
     # Collect all data
-    data_chunks = HTTPTest.receive_all_data(handler, [], 5_000)
+    data_chunks = HTTPTest.receive_all_data(conn, stream_id, [], 5_000)
 
     if data_chunks == [] do
       IO.puts("❌ No data received")

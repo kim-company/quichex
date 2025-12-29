@@ -37,7 +37,7 @@ Logger.info("1. Connecting to 127.0.0.1:4433...")
 Logger.info("   (Make sure quiche-server is running!)")
 
 # Connect
-case Quichex.Quichex.start_connection(
+case Quichex.start_connection(
        host: "127.0.0.1",
        port: 4433,
        config: config
@@ -72,45 +72,51 @@ case Quichex.Quichex.start_connection(
         # Open a stream
         Logger.info("3. Opening bidirectional stream...")
 
-        case Quichex.Connection.open_stream(conn, :bidirectional) do
-          {:ok, handler} ->
-            Logger.info("   ✓ Stream handler opened\n")
+        case Quichex.Connection.open_stream(conn, type: :bidirectional) do
+          {:ok, stream_id} ->
+            Logger.info("   ✓ Stream opened (stream_id=#{stream_id})\n")
 
             # Send HTTP/0.9 GET request (hq-interop protocol)
             Logger.info("4. Sending HTTP/0.9 GET request...")
             request = "GET /index.html\r\n"
 
-            case Quichex.StreamHandler.send_data(handler, request, true) do
-              :ok ->
-                Logger.info("   ✓ Request sent (#{byte_size(request)} bytes)\n")
+            case Quichex.Connection.stream_send(conn, stream_id, request, fin: true) do
+              {:ok, bytes_written} ->
+                Logger.info("   ✓ Request sent (#{bytes_written} bytes)\n")
 
-                # Wait for response (messages sent to controlling process)
-                Logger.info("5. Waiting for response...")
-                Logger.info("   (Messages delivered via StreamHandler)\n")
+                # Wait for response (notification-based)
+                Logger.info("5. Waiting for readable stream notification...")
+                Logger.info("   (Socket always active, immediate delivery)\n")
 
                 receive do
-                  {:quic_stream, ^handler, data} ->
-                    Logger.info("   ✓ Received response!")
-                    Logger.info("   Response (#{byte_size(data)} bytes):")
+                  {:quic_stream_readable, ^conn, ^stream_id} ->
+                    Logger.info("   ✓ Stream readable notification received!")
 
-                    # Show first 200 chars of response
-                    preview =
-                      if byte_size(data) > 200 do
-                        binary_part(data, 0, 200) <> "..."
-                      else
-                        data
-                      end
+                    # Read data from stream
+                    case Quichex.Connection.stream_recv(conn, stream_id) do
+                      {:ok, {data, fin}} ->
+                        Logger.info("   ✓ Received response!")
+                        Logger.info("   Response (#{byte_size(data)} bytes, fin=#{fin}):")
 
-                    Logger.info("   " <> String.replace(preview, "\n", "\n   "))
-                    Logger.info("")
+                        # Show first 200 chars of response
+                        preview =
+                          if byte_size(data) > 200 do
+                            binary_part(data, 0, 200) <> "..."
+                          else
+                            data
+                          end
 
-                    # Wait for stream to finish
-                    receive do
-                      {:quic_stream_fin, ^handler} ->
-                        Logger.info("   ✓ Stream FIN received")
-                    after
-                      2000 ->
-                        Logger.info("   (No FIN received yet, continuing...)")
+                        Logger.info("   " <> String.replace(preview, "\n", "\n   "))
+                        Logger.info("")
+
+                        if fin do
+                          Logger.info("   ✓ Stream FIN received")
+                        else
+                          Logger.info("   (Stream still open, might have more data)")
+                        end
+
+                      {:error, reason} ->
+                        Logger.error("   ✗ Failed to read stream: #{inspect(reason)}")
                     end
 
                   other ->
@@ -131,13 +137,13 @@ case Quichex.Quichex.start_connection(
 
         # Close connection
         Logger.info("\n6. Closing connection...")
-        :ok = Quichex.Quichex.close_connection(conn)
+        :ok = Quichex.close_connection(conn)
         Logger.info("   ✓ Connection closed")
 
       {:error, reason} ->
         Logger.error("   ✗ Handshake failed: #{inspect(reason)}")
         Logger.error("   Make sure quiche-server is running!")
-        Quichex.Quichex.close_connection(conn)
+        Quichex.close_connection(conn)
     end
 
   {:error, reason} ->
