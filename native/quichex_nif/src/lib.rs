@@ -1,5 +1,6 @@
 mod config;
 mod connection;
+mod packet;
 mod resources;
 mod types;
 
@@ -8,6 +9,8 @@ mod types;
 pub use config::*;
 #[allow(unused_imports)]
 pub use connection::*;
+#[allow(unused_imports)]
+pub use packet::*;
 
 #[rustler::nif]
 fn add(a: i64, b: i64) -> i64 {

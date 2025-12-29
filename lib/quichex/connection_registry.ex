@@ -80,14 +80,22 @@ defmodule Quichex.ConnectionRegistry do
   def start_connection(opts) do
     # Inject the caller's PID as controlling_process (for handler messages)
     controlling_process = self()
+    handler = Keyword.get(opts, :handler, Quichex.Handler.Default)
 
+    # Only add controlling_process for Default handler
     opts_with_defaults =
-      opts
-      |> Keyword.put_new(:controlling_process, controlling_process)
-      |> Keyword.put_new(:handler, Quichex.Handler.Default)
-      |> Keyword.update(:handler_opts, [controlling_process: controlling_process], fn handler_opts ->
-        Keyword.put_new(handler_opts, :controlling_process, controlling_process)
-      end)
+      if handler == Quichex.Handler.Default do
+        opts
+        |> Keyword.put_new(:controlling_process, controlling_process)
+        |> Keyword.put_new(:handler, Quichex.Handler.Default)
+        |> Keyword.update(:handler_opts, [controlling_process: controlling_process], fn handler_opts ->
+          Keyword.put_new(handler_opts, :controlling_process, controlling_process)
+        end)
+      else
+        # Custom handler - pass opts as-is
+        opts
+        |> Keyword.put_new(:controlling_process, controlling_process)
+      end
 
     # Start ConnectionSupervisor (which starts Connection)
     case DynamicSupervisor.start_child(__MODULE__, {Quichex.ConnectionSupervisor, opts_with_defaults}) do

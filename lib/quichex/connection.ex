@@ -76,7 +76,15 @@ defmodule Quichex.Connection do
   """
   @spec start_link(keyword()) :: :gen_statem.start_ret()
   def start_link(opts) do
-    connect(opts)
+    mode = Keyword.get(opts, :mode, :client)
+
+    case mode do
+      :server ->
+        :gen_statem.start_link(__MODULE__, {:server, opts}, [])
+
+      :client ->
+        :gen_statem.start_link(__MODULE__, {:client, opts}, [])
+    end
   end
 
   @doc """
@@ -298,7 +306,7 @@ defmodule Quichex.Connection do
     with {:ok, host} <- Keyword.fetch(opts, :host),
          {:ok, port} <- Keyword.fetch(opts, :port),
          {:ok, config} <- Keyword.fetch(opts, :config) do
-      case do_init(host, port, config, opts) do
+      case do_init_client(host, port, config, opts) do
         {:ok, data} ->
           {:ok, :init, data}
 
@@ -321,16 +329,40 @@ defmodule Quichex.Connection do
     end
   end
 
+  def init({:server, opts}) do
+    # Validate required server options
+    required = [:config, :socket, :local_addr, :peer_addr, :scid, :dcid, :listener_pid, :handler]
+
+    case validate_required_opts(opts, required) do
+      :ok ->
+        case do_init_server(opts) do
+          {:ok, data} ->
+            {:ok, :init, data}
+
+          {:error, reason} ->
+            {:stop, {:connection_error, reason}}
+        end
+
+      {:error, missing_key} ->
+        {:stop, {:connection_error, %KeyError{key: missing_key, term: opts}}}
+    end
+  end
+
   ## State Functions
 
   # State: :init
-  def init(:enter, _old_state, _data) do
-    # Trigger immediate timeout to start handshake
+  def init(:enter, _old_state, %State{connection_mode: :client}) do
+    # Client: Trigger immediate timeout to start handshake
     {:keep_state_and_data, [{:state_timeout, 0, :start_handshake}]}
   end
 
-  def init(:state_timeout, :start_handshake, data) do
-    # Generate and send initial packets, schedule timeout
+  def init(:enter, _old_state, %State{connection_mode: :server}) do
+    # Server: Wait for first packet from client (no immediate action)
+    :keep_state_and_data
+  end
+
+  def init(:state_timeout, :start_handshake, %State{connection_mode: :client} = data) do
+    # Client: Generate and send initial packets, schedule timeout
     updated_data =
       data
       |> generate_and_send_packets()
@@ -338,6 +370,28 @@ defmodule Quichex.Connection do
 
     # Transition to handshaking
     {:next_state, :handshaking, updated_data}
+  end
+
+  # Server: Process first packet and transition to handshaking
+  def init(:info, {:udp, socket, _ip, _port, packet}, %State{socket: socket, connection_mode: :server} = data) do
+    recv_info = %{from: data.peer_addr, to: data.local_addr}
+
+    case Native.connection_recv(data.conn_resource, packet, recv_info) do
+      {:ok, _bytes_read} ->
+        # Process first packet and send response
+        updated_data =
+          data
+          |> State.increment_packets_received()
+          |> generate_and_send_packets()
+          |> schedule_next_timeout()
+
+        # Transition to handshaking
+        {:next_state, :handshaking, updated_data}
+
+      {:error, reason} ->
+        Logger.error("Server init packet failed: #{inspect(reason)}")
+        {:stop, {:init_failed, reason}}
+    end
   end
 
   # State: :handshaking
@@ -662,10 +716,8 @@ defmodule Quichex.Connection do
 
   # State: :closed
   def closed(:enter, _old_state, data) do
-    # Clean up socket
-    if data.socket do
-      :gen_udp.close(data.socket)
-    end
+    # Clean up socket (only if we own it - client mode)
+    cleanup_socket(data)
 
     # Call handler callback for connection closed
     updated_data = call_handler(:handle_connection_closed, [self(), data.close_reason || :normal], data)
@@ -704,10 +756,8 @@ defmodule Quichex.Connection do
 
   @impl true
   def terminate(_reason, _state_name, data) do
-    if data.socket do
-      :gen_udp.close(data.socket)
-    end
-
+    # Clean up socket (only if we own it - client mode)
+    cleanup_socket(data)
     :ok
   end
 
@@ -716,7 +766,16 @@ defmodule Quichex.Connection do
     {:ok, state_name, data}
   end
 
-  defp do_init(host, port, config, opts) do
+  # Validates that all required options are present
+  defp validate_required_opts(opts, required_keys) do
+    case Enum.find(required_keys, fn key -> not Keyword.has_key?(opts, key) end) do
+      nil -> :ok
+      missing_key -> {:error, missing_key}
+    end
+  end
+
+  # Initialize client connection
+  defp do_init_client(host, port, config, opts) do
     active = Keyword.get(opts, :active, true)
     local_port = Keyword.get(opts, :local_port, 0)
     mode = Keyword.get(opts, :mode, :auto)
@@ -776,7 +835,11 @@ defmodule Quichex.Connection do
             stream_recv_buffer_size: stream_recv_buffer_size
           )
 
-        state = %{state | controlling_process: controlling_process, scid: scid}
+        state = %{state |
+          connection_mode: :client,
+          controlling_process: controlling_process,
+          scid: scid
+        }
 
         # Initialize handler
         handler_module = Keyword.get(opts, :handler, Quichex.Handler.Default)
@@ -798,6 +861,66 @@ defmodule Quichex.Connection do
     end
   end
 
+  # Initialize server connection
+  defp do_init_server(opts) do
+    config = Keyword.fetch!(opts, :config)
+    socket = Keyword.fetch!(opts, :socket)
+    local_addr = Keyword.fetch!(opts, :local_addr)
+    peer_addr = Keyword.fetch!(opts, :peer_addr)
+    scid = Keyword.fetch!(opts, :scid)
+    dcid = Keyword.fetch!(opts, :dcid)
+    listener_pid = Keyword.fetch!(opts, :listener_pid)
+    handler = Keyword.fetch!(opts, :handler)
+
+    mode = Keyword.get(opts, :mode, :auto)
+    stream_recv_buffer_size = Keyword.get(opts, :stream_recv_buffer_size, 16384)
+    handler_opts = Keyword.get(opts, :handler_opts, [])
+
+    # Create server connection using quiche::accept
+    local_addr_arg = format_address(local_addr)
+    peer_addr_arg = format_address(peer_addr)
+
+    case Native.connection_new_server(
+           scid,
+           nil,  # odcid only used for stateless retry (not yet implemented)
+           local_addr_arg,
+           peer_addr_arg,
+           config.resource,
+           stream_recv_buffer_size
+         ) do
+      {:ok, conn_resource} ->
+        # Create state
+        state =
+          State.new(conn_resource, socket, local_addr, peer_addr, config,
+            mode: mode,
+            stream_recv_buffer_size: stream_recv_buffer_size
+          )
+
+        state = %{state |
+          connection_mode: :server,
+          scid: scid,
+          dcid: dcid,
+          listener_pid: listener_pid,
+          controlling_process: nil  # Server has no controlling process
+        }
+
+        # Initialize handler (REQUIRED for server)
+        case handler.init(self(), handler_opts) do
+          {:ok, handler_state} ->
+            state = %{state | handler_module: handler, handler_state: handler_state}
+            {:ok, state}
+
+          {:error, reason} ->
+            # Don't close socket (listener owns it)
+            {:error, {:handler_init_failed, reason}}
+        end
+
+      {:error, reason} ->
+        # Don't close socket (listener owns it)
+        {:error, reason}
+    end
+  end
+
   defp resolve_address(host, port) when is_binary(host) do
     # Try to parse as IP address first
     case :inet.parse_address(to_charlist(host)) do
@@ -814,6 +937,19 @@ defmodule Quichex.Connection do
             raise "Failed to resolve host #{host}: #{inspect(reason)}"
         end
     end
+  end
+
+  # Cleans up socket - only closes if we own it (client mode)
+  defp cleanup_socket(%State{socket: nil}), do: :ok
+
+  defp cleanup_socket(%State{socket: socket, connection_mode: :client}) do
+    # Client mode: we own the socket, close it
+    :gen_udp.close(socket)
+  end
+
+  defp cleanup_socket(%State{connection_mode: :server}) do
+    # Server mode: listener owns the socket, don't close it
+    :ok
   end
 
   defp format_address({{a, b, c, d}, port})

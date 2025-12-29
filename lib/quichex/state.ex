@@ -18,15 +18,19 @@ defmodule Quichex.State do
   alias Quichex.StreamState
 
   @type workload_mode :: :http | :webtransport | :auto
+  @type connection_mode :: :client | :server
 
   @type t :: %__MODULE__{
           # Core connection state
           conn_resource: reference() | nil,
+          connection_mode: connection_mode(),
           local_addr: {tuple(), :inet.port_number()} | nil,
           peer_addr: {tuple(), :inet.port_number()} | nil,
           config: Quichex.Config.t() | nil,
           socket: :gen_udp.socket() | nil,
           scid: binary() | nil,
+          dcid: binary() | nil,
+          listener_pid: pid() | nil,
           server_name: String.t() | nil,
 
           # Process management
@@ -63,11 +67,14 @@ defmodule Quichex.State do
         }
 
   defstruct conn_resource: nil,
+            connection_mode: :client,
             local_addr: nil,
             peer_addr: nil,
             config: nil,
             socket: nil,
             scid: nil,
+            dcid: nil,
+            listener_pid: nil,
             server_name: nil,
             controlling_process: nil,
             waiters: [],
@@ -143,19 +150,27 @@ defmodule Quichex.State do
 
   @doc """
   Allocates a new bidirectional stream ID.
+
+  Client-initiated: stream_id % 4 == 0
+  Server-initiated: stream_id % 4 == 1
   """
   @spec allocate_bidi_stream(t()) :: {StreamState.stream_id(), t()}
-  def allocate_bidi_stream(%__MODULE__{next_bidi_stream: next} = state) do
-    stream_id = next * 4
+  def allocate_bidi_stream(%__MODULE__{next_bidi_stream: next, connection_mode: mode} = state) do
+    offset = if mode == :server, do: 1, else: 0
+    stream_id = next * 4 + offset
     {stream_id, %{state | next_bidi_stream: next + 1}}
   end
 
   @doc """
   Allocates a new unidirectional stream ID.
+
+  Client-initiated: stream_id % 4 == 2
+  Server-initiated: stream_id % 4 == 3
   """
   @spec allocate_uni_stream(t()) :: {StreamState.stream_id(), t()}
-  def allocate_uni_stream(%__MODULE__{next_uni_stream: next} = state) do
-    stream_id = next * 4 + 2
+  def allocate_uni_stream(%__MODULE__{next_uni_stream: next, connection_mode: mode} = state) do
+    offset = if mode == :server, do: 3, else: 2
+    stream_id = next * 4 + offset
     {stream_id, %{state | next_uni_stream: next + 1}}
   end
 

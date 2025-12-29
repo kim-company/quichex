@@ -48,6 +48,53 @@ pub fn connection_new_client(
     }))
 }
 
+/// Creates a new QUIC server connection
+#[rustler::nif]
+pub fn connection_new_server(
+    scid: Binary,  // Server's connection ID
+    odcid: Option<Binary>,  // Original destination connection ID (for retry packets)
+    local_addr: Binary,  // 6 bytes for IPv4 or 18 bytes for IPv6
+    peer_addr: Binary,
+    config: ResourceArc<ConfigResource>,
+    stream_recv_buffer_size: usize,
+) -> Result<ResourceArc<ConnectionResource>, String> {
+    let cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    let scid_ref = quiche::ConnectionId::from_ref(scid.as_slice());
+
+    // Parse optional original destination connection ID
+    let odcid_ref = odcid.as_ref().map(|b| quiche::ConnectionId::from_ref(b.as_slice()));
+
+    // Parse addresses from binary
+    let local_sock_addr = parse_address_binary(local_addr.as_slice())?;
+    let peer_sock_addr = parse_address_binary(peer_addr.as_slice())?;
+
+    // Clone the config for this connection
+    let mut config_clone = {
+        let _config_ref = &*cfg;
+        drop(cfg); // Release the lock
+        config.inner.lock().map_err(|e| format!("Lock error: {}", e))?
+    };
+
+    // KEY DIFFERENCE: Use quiche::accept() for server instead of quiche::connect()
+    let conn = quiche::accept(
+        &scid_ref,
+        odcid_ref.as_ref(),
+        local_sock_addr,
+        peer_sock_addr,
+        &mut *config_clone,
+    )
+    .map_err(|e| format!("Failed to accept connection: {:?}", e))?;
+
+    Ok(ResourceArc::new(ConnectionResource {
+        inner: Arc::new(Mutex::new(conn)),
+        stream_recv_buffer_size,
+    }))
+}
+
 fn parse_address_binary(addr: &[u8]) -> Result<std::net::SocketAddr, String> {
     if addr.len() == 6 {
         // IPv4: 4 bytes IP + 2 bytes port (big endian)

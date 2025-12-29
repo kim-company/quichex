@@ -33,6 +33,7 @@ defmodule Quichex.Native do
 
   # Connection NIFs
   def connection_new_client(_scid, _server_name, _local_addr, _peer_addr, _config, _stream_recv_buffer_size), do: error()
+  def connection_new_server(_scid, _odcid, _local_addr, _peer_addr, _config, _stream_recv_buffer_size), do: error()
   def connection_recv(_conn, _packet, _recv_info), do: error()
   def connection_send(_conn), do: error()
   def connection_timeout(_conn), do: error()
@@ -55,6 +56,11 @@ defmodule Quichex.Native do
   def connection_writable_streams(_conn), do: error()
   def connection_stream_finished(_conn, _stream_id), do: error()
   def connection_stream_shutdown(_conn, _stream_id, _direction, _err_code), do: error()
+
+  # Packet NIFs
+  def header_info(_packet, _dcid_len), do: error()
+  def version_negotiate(_scid, _dcid), do: error()
+  def retry(_scid, _dcid, _new_scid, _token, _version), do: error()
 
   defp error, do: :erlang.nif_error(:nif_not_loaded)
 end
