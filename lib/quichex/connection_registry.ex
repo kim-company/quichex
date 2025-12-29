@@ -3,7 +3,7 @@ defmodule Quichex.ConnectionRegistry do
   DynamicSupervisor managing all QUIC connections.
 
   Each connection is supervised by a ConnectionSupervisor which manages
-  the Connection process and its StreamHandlerSupervisor.
+  the Connection process.
 
   ## Configuration
 
@@ -15,8 +15,7 @@ defmodule Quichex.ConnectionRegistry do
 
       ConnectionRegistry [DynamicSupervisor]
       ├─ ConnectionSupervisor (per connection)
-      │   ├─ Connection
-      │   └─ StreamHandlerSupervisor
+      │   └─ Connection
       ├─ ConnectionSupervisor (per connection)
       ...
 
@@ -55,9 +54,7 @@ defmodule Quichex.ConnectionRegistry do
 
   ## Options
 
-  Same as `Quichex.Connection.connect/1`, plus:
-
-    * `:max_stream_handlers` - Override application config for max stream handlers
+  Same as `Quichex.Connection.connect/1`.
 
   ## Returns
 
@@ -85,7 +82,7 @@ defmodule Quichex.ConnectionRegistry do
     opts_with_controlling_process =
       Keyword.put_new(opts, :controlling_process, self())
 
-    # Start ConnectionSupervisor (which starts Connection + StreamHandlerSupervisor)
+    # Start ConnectionSupervisor (which starts Connection)
     case DynamicSupervisor.start_child(__MODULE__, {Quichex.ConnectionSupervisor, opts_with_controlling_process}) do
       {:ok, conn_sup_pid} ->
         # Get the Connection PID from ConnectionSupervisor children
@@ -121,7 +118,7 @@ defmodule Quichex.ConnectionRegistry do
 
   # Get Connection PID from ConnectionSupervisor
   defp get_connection_pid(conn_sup_pid) do
-    # ConnectionSupervisor has 2 children: Connection and StreamHandlerSupervisor
+    # ConnectionSupervisor has 1 child: Connection
     # Find the Connection process by its id
     Quichex.ConnectionSupervisor.connection_pid(conn_sup_pid)
   end

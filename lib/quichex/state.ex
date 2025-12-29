@@ -14,7 +14,7 @@ defmodule Quichex.State do
   ## Socket Mode
 
   The UDP socket is always in `{active, true}` mode for minimum latency.
-  Data is immediately delivered to StreamHandler callbacks - no buffering.
+  Socket notifications sent immediately - no buffering.
   """
 
   alias Quichex.{StreamState, Action}
@@ -95,11 +95,7 @@ defmodule Quichex.State do
 
     * `:server_name` - Server name for SNI (default: `nil`)
     * `:mode` - Workload mode: `:http`, `:webtransport`, or `:auto` (default: `:auto`)
-    * `:stream_worker_threshold` - Bytes threshold for spawning stream workers (default: 65536)
-    * `:max_stream_workers` - Maximum concurrent stream workers (default: 100)
-    * `:stream_handler` - Module implementing Quichex.StreamHandler.Behaviour for incoming streams (default: `nil`)
-    * `:stream_handler_opts` - Options passed to stream handler init (default: `[]`)
-    * `:stream_handler_sup` - PID of StreamHandlerSupervisor (default: `nil`)
+    * `:stream_recv_buffer_size` - Maximum bytes to read per stream_recv call (default: `65536`)
 
   ## Examples
 

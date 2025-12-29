@@ -44,34 +44,26 @@ defmodule Quichex.Connection do
     * `:host` - Server hostname (required)
     * `:port` - Server port (required)
     * `:config` - `%Quichex.Config{}` struct (required)
-    * `:active` - Active mode like `:gen_tcp` (default: `true`)
     * `:local_port` - Local port to bind to (default: `0` for random)
     * `:mode` - Workload mode: `:http`, `:webtransport`, or `:auto` (default: `:auto`)
-    * `:stream_handler` - StreamHandler module for incoming streams (default: `nil`)
-    * `:stream_handler_opts` - Options passed to stream handler's `init/4` (default: `[]`)
-    * `:max_stream_handlers` - Maximum concurrent stream handlers (default: `1000`)
+    * `:stream_recv_buffer_size` - Maximum bytes to read per stream_recv call (default: `65536`)
 
   ## Examples
 
-      # Basic connection (imperative API)
       config = Quichex.Config.new!()
         |> Quichex.Config.set_application_protos(["http/1.1"])
         |> Quichex.Config.verify_peer(false)
 
-      {:ok, pid} = Quichex.Connection.connect(
+      {:ok, conn} = Quichex.Connection.connect(
         host: "localhost",
         port: 4433,
         config: config
       )
 
-      # Connection with stream handler (for incoming streams)
-      {:ok, pid} = Quichex.Connection.connect(
-        host: "server.example.com",
-        port: 4433,
-        config: config,
-        stream_handler: MyApp.EchoHandler,
-        stream_handler_opts: [buffer_size: 4096]
-      )
+      # Wait for connection to establish
+      receive do
+        {:quic_connected, ^conn} -> :ok
+      end
 
   """
   @spec connect(keyword()) :: :gen_statem.start_ret()
@@ -142,7 +134,7 @@ defmodule Quichex.Connection do
   end
 
   @doc """
-  Opens a new stream and spawns a StreamHandler for it.
+  Opens a new stream.
 
   ## Arguments
 
@@ -152,29 +144,26 @@ defmodule Quichex.Connection do
   ## Options
 
     * `:type` - Stream type: `:bidirectional` or `:unidirectional` (default: `:bidirectional`)
-    * `:handler` - StreamHandler module (default: `Quichex.StreamHandler.Message`)
-    * `:handler_opts` - Options passed to handler's `init/4` callback (default: `[]`)
 
   ## Returns
 
-    * `{:ok, handler_pid}` - PID of the spawned StreamHandler
+    * `{:ok, stream_id}` - Stream ID of the newly opened stream
     * `{:error, reason}` - On failure
 
   ## Examples
 
-      # Default MessageHandler (sends messages to controlling process)
-      {:ok, handler} = Connection.open_stream(conn, :bidirectional)
-      StreamHandler.send_data(handler, "Hello", fin: true)
+      # Open a bidirectional stream
+      {:ok, stream_id} = Connection.open_stream(conn, type: :bidirectional)
+      {:ok, _bytes} = Connection.stream_send(conn, stream_id, "Hello", fin: true)
+
+      # Wait for readable notification
       receive do
-        {:quic_stream, ^handler, data} -> IO.puts(data)
+        {:quic_stream_readable, ^conn, ^stream_id} ->
+          {:ok, {_data, _fin}} = Connection.stream_recv(conn, stream_id)
       end
 
-      # Custom handler
-      {:ok, handler} = Connection.open_stream(conn,
-        type: :bidirectional,
-        handler: MyApp.EchoHandler,
-        handler_opts: [buffer_size: 4096]
-      )
+      # Shorthand for type
+      {:ok, stream_id} = Connection.open_stream(conn, :bidirectional)
   """
   @spec open_stream(pid(), :bidirectional | :unidirectional | keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
@@ -487,25 +476,6 @@ defmodule Quichex.Connection do
     {:keep_state, updated_data}
   end
 
-  def connected(:info, {:stream_handler_sent, stream_id, bytes_written}, data) do
-    # StreamHandler notified us that it wrote data
-    # Update stream state and generate packets
-    {stream, new_data} = State.get_or_create_stream(data, stream_id, :bidirectional)
-
-    stream = Quichex.StreamState.add_bytes_sent(stream, bytes_written)
-
-    new_data =
-      new_data
-      |> State.update_stream(stream)
-      |> StateMachine.generate_pending_packets()
-
-    # Execute actions (packet sends) and get updated state
-    {actions, new_data} = State.take_actions(new_data)
-    updated_data = execute_actions(actions, new_data)
-
-    {:keep_state, updated_data}
-  end
-
   def connected({:call, from}, :wait_connected, _data) do
     {:keep_state_and_data, [{:reply, from, :ok}]}
   end
@@ -659,11 +629,6 @@ defmodule Quichex.Connection do
 
   # Ignore UDP packets in closed state
   def closed(:info, {:udp, _socket, _ip, _port, _packet}, _data) do
-    :keep_state_and_data
-  end
-
-  # Ignore stream handler messages in closed state
-  def closed(:info, {:stream_handler_sent, _stream_id, _bytes}, _data) do
     :keep_state_and_data
   end
 

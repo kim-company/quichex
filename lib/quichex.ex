@@ -36,10 +36,7 @@ defmodule Quichex do
 
   ## Options
 
-  Same as `Quichex.Connection.connect/1`, plus:
-
-    * `:max_stream_handlers` - Maximum concurrent stream handlers for this
-      connection (default: from application config)
+  Same as `Quichex.Connection.connect/1`.
 
   ## Returns
 

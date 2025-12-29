@@ -21,9 +21,9 @@ defmodule Quichex.StreamState do
 
   ## Data Flow
 
-  Stream data is delivered immediately to StreamHandler callbacks for minimum latency.
-  No buffering occurs at the StreamState level - handlers are responsible for any
-  buffering they need.
+  Stream readable notifications are delivered immediately to the controlling process for minimum latency.
+  No buffering occurs at the StreamState level - applications read data on-demand via
+  `Connection.stream_recv/3` when ready to process it.
   """
 
   @type stream_id :: non_neg_integer()
