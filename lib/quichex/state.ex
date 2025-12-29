@@ -35,6 +35,10 @@ defmodule Quichex.State do
           controlling_process: pid() | nil,
           waiters: [:gen_statem.from()],
 
+          # Handler system
+          handler_module: module() | nil,
+          handler_state: term() | nil,
+
           # Connection lifecycle
           established: boolean(),
           closed: boolean(),
@@ -72,6 +76,8 @@ defmodule Quichex.State do
             server_name: nil,
             controlling_process: nil,
             waiters: [],
+            handler_module: nil,
+            handler_state: nil,
             established: false,
             closed: false,
             close_reason: nil,

@@ -78,12 +78,19 @@ defmodule Quichex.ConnectionRegistry do
   """
   @spec start_connection(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_connection(opts) do
-    # Inject the caller's PID as controlling_process (for active mode messages)
-    opts_with_controlling_process =
-      Keyword.put_new(opts, :controlling_process, self())
+    # Inject the caller's PID as controlling_process (for handler messages)
+    controlling_process = self()
+
+    opts_with_defaults =
+      opts
+      |> Keyword.put_new(:controlling_process, controlling_process)
+      |> Keyword.put_new(:handler, Quichex.Handler.Default)
+      |> Keyword.update(:handler_opts, [controlling_process: controlling_process], fn handler_opts ->
+        Keyword.put_new(handler_opts, :controlling_process, controlling_process)
+      end)
 
     # Start ConnectionSupervisor (which starts Connection)
-    case DynamicSupervisor.start_child(__MODULE__, {Quichex.ConnectionSupervisor, opts_with_controlling_process}) do
+    case DynamicSupervisor.start_child(__MODULE__, {Quichex.ConnectionSupervisor, opts_with_defaults}) do
       {:ok, conn_sup_pid} ->
         # Get the Connection PID from ConnectionSupervisor children
         case get_connection_pid(conn_sup_pid) do

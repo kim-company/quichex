@@ -360,6 +360,14 @@ defmodule Quichex.Connection do
     # Execute actions and get updated state
     updated_data = execute_actions(actions, new_data)
 
+    # Detect connection established event
+    updated_data =
+      if updated_data.established and not data.established do
+        call_handler(:handle_connected, [self()], updated_data)
+      else
+        updated_data
+      end
+
     # Check if we're now established
     if updated_data.established do
       {:next_state, :connected, updated_data}
@@ -456,6 +464,27 @@ defmodule Quichex.Connection do
 
     # Execute actions and get updated state
     updated_data = execute_actions(actions, new_data)
+
+    # Detect new streams (stream_opened events)
+    old_stream_ids = MapSet.new(Map.keys(data.streams))
+    new_stream_ids = MapSet.new(Map.keys(updated_data.streams))
+    newly_opened_streams = MapSet.difference(new_stream_ids, old_stream_ids)
+
+    updated_data =
+      Enum.reduce(newly_opened_streams, updated_data, fn stream_id, acc ->
+        # Determine direction based on stream ID (odd = peer-initiated)
+        direction = if rem(stream_id, 2) == 1, do: :incoming, else: :outgoing
+        # TODO: detect uni vs bidi streams properly
+        stream_type = :bidirectional
+
+        call_handler(:handle_stream_opened, [self(), stream_id, direction, stream_type], acc)
+      end)
+
+    # Detect readable streams (stream_readable events)
+    updated_data =
+      Enum.reduce(updated_data.readable_streams, updated_data, fn stream_id, acc ->
+        call_handler(:handle_stream_readable, [self(), stream_id], acc)
+      end)
 
     # Check if connection is still open
     if updated_data.closed do
@@ -609,13 +638,11 @@ defmodule Quichex.Connection do
       :gen_udp.close(data.socket)
     end
 
-    # Notify controlling process if in active mode
-    if data.controlling_process do
-      send(data.controlling_process, {:quic_connection_closed, self(), data.close_reason || :normal})
-    end
+    # Call handler callback for connection closed
+    updated_data = call_handler(:handle_connection_closed, [self(), data.close_reason || :normal], data)
 
     # Schedule stop after a short delay to allow final calls
-    {:keep_state_and_data, [{:state_timeout, 1000, :stop}]}
+    {:keep_state, updated_data, [{:state_timeout, 1000, :stop}]}
   end
 
   def closed(:state_timeout, :stop, _data) do
@@ -722,7 +749,19 @@ defmodule Quichex.Connection do
 
         state = %{state | controlling_process: controlling_process, scid: scid}
 
-        {:ok, state}
+        # Initialize handler
+        handler_module = Keyword.get(opts, :handler, Quichex.Handler.Default)
+        handler_opts = Keyword.get(opts, :handler_opts, [controlling_process: controlling_process])
+
+        case handler_module.init(self(), handler_opts) do
+          {:ok, handler_state} ->
+            state = %{state | handler_module: handler_module, handler_state: handler_state}
+            {:ok, state}
+
+          {:error, reason} ->
+            :gen_udp.close(socket)
+            {:error, {:handler_init_failed, reason}}
+        end
 
       {:error, reason} ->
         :gen_udp.close(socket)
@@ -773,6 +812,32 @@ defmodule Quichex.Connection do
       Action.execute(action, context)
       acc_data
     end)
+  end
+
+  # Handler callback helper
+  defp call_handler(_callback_name, _args, %{handler_module: nil} = data) do
+    # No handler configured, just return data unchanged
+    data
+  end
+
+  defp call_handler(callback_name, args, data) do
+    try do
+      case apply(data.handler_module, callback_name, args ++ [data.handler_state]) do
+        {:ok, new_handler_state} ->
+          %{data | handler_state: new_handler_state}
+
+        other ->
+          Logger.warning(
+            "Handler callback #{callback_name} returned unexpected value: #{inspect(other)}"
+          )
+
+          data
+      end
+    rescue
+      e ->
+        Logger.error("Handler callback #{callback_name} crashed: #{inspect(e)}")
+        reraise e, __STACKTRACE__
+    end
   end
 
 end

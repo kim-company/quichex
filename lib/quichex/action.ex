@@ -15,7 +15,6 @@ defmodule Quichex.Action do
 
   @type t ::
           {:send_packets, [{binary(), send_info()}]}
-          | {:send_to_app, pid(), term()}
           | {:schedule_timeout, milliseconds()}
           | {:close_stream, stream_id()}
           | {:spawn_stream_worker, stream_id(), stream_type()}
@@ -39,11 +38,6 @@ defmodule Quichex.Action do
       :gen_udp.send(socket, to_ip, to_port, packet)
     end)
 
-    :ok
-  end
-
-  def execute({:send_to_app, pid, message}, _context) when is_pid(pid) do
-    send(pid, message)
     :ok
   end
 

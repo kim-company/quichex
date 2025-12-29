@@ -187,12 +187,9 @@ defmodule Quichex.StateMachine do
       {:ok, true} ->
         Logger.debug("Connection established")
 
-        action = {:send_to_app, state.controlling_process, {:quic_connected, self()}}
-
         state
         |> State.mark_established()
         |> State.reply_to_waiters(:ok)
-        |> State.add_action(action)
 
       _ ->
         state
@@ -201,34 +198,10 @@ defmodule Quichex.StateMachine do
 
   @doc false
   defp process_readable_streams(%State{} = state) do
-    # Get list of readable streams and send notifications to controlling process
+    # Get list of readable streams
     case Native.connection_readable_streams(state.conn_resource) do
       {:ok, readable_streams} ->
         state = %{state | readable_streams: readable_streams}
-
-        # Send notification for each readable stream
-        actions =
-          Enum.map(readable_streams, fn stream_id ->
-            # Check if this is a new stream (never seen before)
-            is_new_stream = not Map.has_key?(state.streams, stream_id)
-
-            if is_new_stream do
-              # Determine direction based on stream ID (odd = peer-initiated)
-              direction = if rem(stream_id, 2) == 1, do: :incoming, else: :outgoing
-              stream_type = :bidirectional  # TODO: detect uni vs bidi
-
-              # Create stream state (but don't read data yet)
-              {_stream, _new_state} = State.get_or_create_stream(state, stream_id, stream_type)
-
-              # Notify about new stream
-              {:send_to_app, state.controlling_process,
-               {:quic_stream_opened, self(), stream_id, direction, stream_type}}
-            else
-              # Existing stream - just notify readable
-              {:send_to_app, state.controlling_process,
-               {:quic_stream_readable, self(), stream_id}}
-            end
-          end)
 
         # Update state with new streams if any
         state =
@@ -242,7 +215,7 @@ defmodule Quichex.StateMachine do
             end
           end)
 
-        State.add_actions(state, actions)
+        state
 
       {:error, _reason} ->
         state
