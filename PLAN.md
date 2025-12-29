@@ -2,6 +2,53 @@
 
 **An Elixir library providing QUIC transport via Rustler bindings to cloudflare/quiche**
 
+---
+
+## Current Status (December 2025)
+
+### ✅ Completed (Milestones 1-4)
+
+**Architecture**: Production-ready client with gen_statem + Handler system
+- **Connection**: Full gen_statem implementation with inline state transitions
+- **State Management**: Pure functional State and StreamState modules
+- **Handler System**: Declarative event handling with action returns
+  - `Handler.Default`: Message-based API (backward compatible)
+  - Custom handlers: Declarative action-based control flow
+- **Supervision**: ConnectionRegistry (DynamicSupervisor) manages all connections
+- **Tests**: 60 passing tests (75 total, 15 excluded)
+- **Interop**: Successfully connects to cloudflare-quic.com, quiche servers
+
+**What Works**:
+1. ✅ Client connections (connect, handshake, close)
+2. ✅ TLS handshake with real servers (cloudflare-quic.com)
+3. ✅ Stream operations (open, send, receive, shutdown)
+4. ✅ Multiplexing (multiple concurrent streams)
+5. ✅ Active mode (always-on, minimum latency)
+6. ✅ Handler actions (read_stream, send_data, refuse_stream, etc.)
+7. ✅ Zero-copy Rust<->Elixir (Binary for all byte data)
+8. ✅ Process supervision (fault isolation)
+
+### ⏳ Next: Milestone 5 - Server-Side Listener
+
+**Goal**: Accept incoming QUIC connections
+
+**What's Needed**:
+1. Server NIFs (Rust): `connection_new_server`, `header_info`, `version_negotiate`
+2. Listener GenServer (Elixir): Packet routing, connection acceptance
+3. Server mode for Connection: Different initialization flow
+4. Tests: Unit, integration, interop (quiche-client)
+
+**Estimated Effort**: 4-6 sessions (1-2 weeks)
+
+**Key Challenges**:
+- DCID-based packet routing (connection ID → connection process)
+- Socket ownership (Listener owns socket, passes packets)
+- Server-side handshake flow (wait for client Initial)
+
+See [Milestone 5](#milestone-5-server-side-listener-️--in-progress) for detailed implementation plan.
+
+---
+
 ## Vision
 
 Quichex will be a production-ready QUIC transport library for Elixir that leverages the BEAM's concurrency model. Each QUIC connection runs in its own lightweight Elixir process, enabling massive concurrency with fault isolation. The library will expose a clean, idiomatic Elixir API while using Rustler to safely wrap the battle-tested cloudflare/quiche implementation.
@@ -26,18 +73,22 @@ Quichex will be a production-ready QUIC transport library for Elixir that levera
                           ▼
 ┌─────────────────────────────────────────────────────────┐
 │ Quichex Public API (Elixir)                             │
-│  - Quichex.Connection (GenServer)                       │
-│  - Quichex.Listener (GenServer)                         │
+│  - Quichex.Connection (gen_statem)                      │
+│  - Quichex.State (pure functional state)                │
+│  - Quichex.StreamState (stream state management)        │
+│  - Quichex.Handler (behaviour for event handling)       │
+│  - Quichex.Handler.Default (message-based API)          │
 │  - Quichex.Config (struct + builder)                    │
-│  - Quichex.Stream (abstraction)                         │
+│  - Quichex.ConnectionRegistry (DynamicSupervisor)       │
+│  - Quichex.Listener (GenServer) [TODO]                  │
 └─────────────────────────────────────────────────────────┘
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────┐
-│ Quichex.NIF (Rustler NIFs - Internal)                   │
+│ Quichex.Native (Rustler NIFs - Internal)                │
 │  - config_* functions                                   │
 │  - connection_* functions                               │
-│  - Resource management                                  │
+│  - Resource management (ConfigResource, Connection)     │
 └─────────────────────────────────────────────────────────┘
                           │
                           ▼
@@ -51,9 +102,30 @@ Quichex will be a production-ready QUIC transport library for Elixir that levera
                           ▼
 ┌─────────────────────────────────────────────────────────┐
 │ :gen_udp (Erlang)                                       │
-│  - UDP socket I/O                                       │
+│  - UDP socket I/O (always active mode)                  │
 └─────────────────────────────────────────────────────────┘
 ```
+
+## Key Design Decisions
+
+### Process Model (gen_statem + Handlers)
+- **Connection**: `gen_statem` with inline state transitions and side effects
+- **States**: `:init` → `:handshaking` → `:connected` → `:closed`
+- **Pure Functional Helpers**: Complex state transformations in `State` and `StreamState`
+- **Handler System**: Connection-level callbacks for declarative event handling
+  - `Handler.Default`: Sends messages to controlling process (imperative API)
+  - Custom handlers: Return actions for declarative control flow
+- **Socket Mode**: Always `{active, true}` for minimum latency
+- **Supervision**: `ConnectionRegistry` (DynamicSupervisor) manages all connections
+
+### Handler Actions
+Handlers can return actions executed immediately by the connection:
+- `{:read_stream, stream_id, opts}` - Read stream data
+- `{:send_data, stream_id, data, opts}` - Send data
+- `{:refuse_stream, stream_id, error_code}` - Refuse stream
+- `{:open_stream, opts}` - Open new stream
+- `{:shutdown_stream, stream_id, direction, error_code}` - Shutdown stream
+- `{:close_connection, error_code, reason}` - Close connection
 
 ## Public API Design
 
@@ -83,76 +155,98 @@ config = Quichex.Config.new()
 ### Client Connection
 
 ```elixir
-# Start a client connection
-{:ok, conn_pid} = Quichex.Connection.connect(
+# Start a client connection (supervised, with default handler)
+{:ok, conn_pid} = Quichex.start_connection(
   host: "cloudflare-quic.com",
   port: 443,
-  config: config,
-  # Optional:
-  local_port: 0,  # random port
-  active: true    # like :gen_tcp/:gen_udp active mode
+  config: config
 )
 
 # Wait for handshake completion
-case Quichex.Connection.wait_connected(conn_pid, timeout: 5000) do
+case Quichex.wait_connected(conn_pid, timeout: 5000) do
   :ok -> IO.puts("Connected!")
   {:error, reason} -> IO.puts("Failed: #{inspect(reason)}")
 end
 
-# Alternative: async notifications
+# Or receive async notifications (Handler.Default sends messages)
 receive do
   {:quic_connected, ^conn_pid} ->
     IO.puts("Connection established")
-  {:quic_connection_error, ^conn_pid, reason} ->
-    IO.puts("Connection failed: #{inspect(reason)}")
+  {:quic_connection_closed, ^conn_pid, reason} ->
+    IO.puts("Connection closed: #{inspect(reason)}")
 end
 
-# Get connection stats
-{:ok, stats} = Quichex.Connection.stats(conn_pid)
-# => %{
-#   rtt: 45_000,  # microseconds
-#   cwnd: 14_000, # bytes
-#   bytes_sent: 1_234_567,
-#   bytes_received: 987_654,
-#   ...
-# }
+# Use custom handler for declarative event handling
+defmodule MyHandler do
+  @behaviour Quichex.Handler
+
+  def init(_conn_pid, _opts), do: {:ok, %{}}
+
+  def handle_connected(conn_pid, state) do
+    IO.puts("Connected!")
+    # Open a stream immediately
+    actions = [{:open_stream, type: :bidirectional}]
+    {:ok, state, actions}
+  end
+
+  def handle_stream_readable(conn_pid, stream_id, state) do
+    # Request to read stream data
+    actions = [{:read_stream, stream_id, []}]
+    {:ok, state, actions}
+  end
+
+  def handle_stream_data(conn_pid, stream_id, data, fin, state) do
+    IO.inspect(data, label: "Received")
+    {:ok, state}
+  end
+
+  # ... implement other required callbacks
+end
+
+{:ok, conn} = Quichex.start_connection(
+  host: "example.com",
+  port: 443,
+  config: config,
+  handler: MyHandler
+)
 ```
 
 ### Stream Operations
 
 ```elixir
 # Open a stream
-{:ok, stream_id} = Quichex.Connection.open_stream(conn_pid, :bidirectional)
+{:ok, stream_id} = Quichex.open_stream(conn_pid, :bidirectional)
 # or
-{:ok, stream_id} = Quichex.Connection.open_stream(conn_pid, :unidirectional)
+{:ok, stream_id} = Quichex.open_stream(conn_pid, :unidirectional)
 
 # Send data on stream
-:ok = Quichex.Connection.stream_send(conn_pid, stream_id, "Hello", fin: false)
-:ok = Quichex.Connection.stream_send(conn_pid, stream_id, " QUIC!", fin: true)
+:ok = Quichex.send_data(conn_pid, stream_id, "Hello", fin: false)
+:ok = Quichex.send_data(conn_pid, stream_id, " QUIC!", fin: true)
 
-# Active mode (default): receive messages
+# Receive messages (Handler.Default automatically reads streams)
 receive do
-  {:quic_stream, ^conn_pid, ^stream_id, data} ->
+  {:quic_stream_opened, ^conn_pid, ^stream_id, :incoming, :bidirectional} ->
+    IO.puts("New incoming stream")
+
+  {:quic_stream_readable, ^conn_pid, ^stream_id} ->
+    IO.puts("Stream has data available")
+
+  {:quic_stream_data, ^conn_pid, ^stream_id, data, fin} ->
     IO.puts("Received: #{data}")
+    if fin, do: IO.puts("Stream finished")
 
-  {:quic_stream_fin, ^conn_pid, ^stream_id} ->
-    IO.puts("Stream finished")
-
-  {:quic_stream_reset, ^conn_pid, ^stream_id, error_code} ->
-    IO.puts("Stream reset: #{error_code}")
+  {:quic_stream_finished, ^conn_pid, ^stream_id} ->
+    IO.puts("Stream fully received")
 end
 
-# Passive mode: explicit receive
-{:ok, data, fin?} = Quichex.Connection.stream_recv(conn_pid, stream_id)
-
 # Get readable/writable streams
-{:ok, readable_streams} = Quichex.Connection.readable_streams(conn_pid)
-{:ok, writable_streams} = Quichex.Connection.writable_streams(conn_pid)
+{:ok, readable_streams} = Quichex.readable_streams(conn_pid)
+{:ok, writable_streams} = Quichex.writable_streams(conn_pid)
 
 # Close/reset stream
-:ok = Quichex.Connection.stream_shutdown(conn_pid, stream_id, :read, error_code: 0)
-:ok = Quichex.Connection.stream_shutdown(conn_pid, stream_id, :write, error_code: 0)
-:ok = Quichex.Connection.stream_shutdown(conn_pid, stream_id, :both, error_code: 0)
+:ok = Quichex.shutdown_stream(conn_pid, stream_id, :read, error_code: 0)
+:ok = Quichex.shutdown_stream(conn_pid, stream_id, :write, error_code: 0)
+:ok = Quichex.shutdown_stream(conn_pid, stream_id, :both, error_code: 0)
 ```
 
 ### Server Listener
@@ -246,22 +340,31 @@ end
 # Connection failures send {:quic_connection_error, pid, reason} messages
 ```
 
-## Message Protocol
+## Message Protocol (Handler.Default)
 
-When `active: true` (default), the connection sends messages to the controlling process:
+When using `Handler.Default` (the default), messages are sent to the controlling process:
 
 ```elixir
 # Connection lifecycle
 {:quic_connected, conn_pid}
-{:quic_connection_error, conn_pid, reason}
-{:quic_connection_closed, conn_pid, error_code, reason}
+{:quic_connection_closed, conn_pid, reason}
 
-# Streams
-{:quic_stream, conn_pid, stream_id, data}
-{:quic_stream_fin, conn_pid, stream_id}
-{:quic_stream_reset, conn_pid, stream_id, error_code}
-{:quic_stream_stopped, conn_pid, stream_id, error_code}
+# Stream events
+{:quic_stream_opened, conn_pid, stream_id, direction, stream_type}
+# direction: :incoming | :outgoing
+# stream_type: :bidirectional | :unidirectional
 
+{:quic_stream_readable, conn_pid, stream_id}
+# Sent when stream has data available
+
+{:quic_stream_data, conn_pid, stream_id, data, fin}
+# Automatically sent after :quic_stream_readable (Handler.Default auto-reads)
+# fin: true means no more data will arrive
+
+{:quic_stream_finished, conn_pid, stream_id}
+# Stream fully received and closed
+
+# Future features (not yet implemented)
 # Datagrams
 {:quic_dgram, conn_pid, data}
 
@@ -609,9 +712,11 @@ Quichex.Connection.close(conn)
 
 ## Milestone 4: Stream Operations 📊 ✅
 
-**Status**: **COMPLETE** - All 69 tests passing (52 config + 12 connection + 12 stream + 5 integration)! 🎉
+**Status**: **COMPLETE** - 60 passing tests + Handler system fully implemented! 🎉
 
-**Goal**: Send and receive data on QUIC streams with proper flow control
+**Goal**: Send and receive data on QUIC streams with declarative handler system
+
+**Additional Achievement**: Implemented comprehensive Handler behaviour for declarative event handling alongside traditional message-based API.
 
 ### Completed Work:
 
@@ -711,76 +816,238 @@ Quichex.Connection.close(conn)
 
 ---
 
-## Milestone 5: Server-Side Listener 🖥️
+## Milestone 5: Server-Side Listener 🖥️ ⏳ IN PROGRESS
 
 **Goal**: Accept incoming QUIC connections as a server
 
-### TODOs:
+**Current Status**: Client-side fully working. Server-side NIFs and Listener module needed.
 
-#### Rust Side:
+### What We Have ✅
 
-- [ ] Add server NIFs to `connection.rs`:
-  - [ ] `connection_new_server(scid: Vec<u8>, odcid: Option<Vec<u8>>, local_addr: String, peer_addr: String, config: ResourceArc<ConfigResource>) -> Result<ResourceArc<ConnectionResource>, String>`
-  - [ ] `header_info(packet: Binary, scid_len: usize) -> Result<HeaderInfoTerm, String>` - parse packet header without full decode
-  - [ ] `retry(scid: Vec<u8>, dcid: Vec<u8>, new_scid: Vec<u8>, token: Vec<u8>, version: u32) -> Result<OwnedBinary, String>` - generate retry packet
-  - [ ] `negotiate_version(scid: Vec<u8>, dcid: Vec<u8>) -> Result<OwnedBinary, String>`
-- [ ] Add connection ID generation helpers:
-  - [ ] Simple random SCID generator (can be called from Elixir)
+- ✅ Full client-side implementation with gen_statem
+- ✅ Handler system (can be reused for server connections)
+- ✅ State management (State, StreamState modules)
+- ✅ Connection supervision (ConnectionRegistry, ConnectionSupervisor)
+- ✅ Stream operations working (send/recv, multiplexing)
+- ✅ UDP socket handling in active mode
+- ✅ Configuration system with TLS support
 
-#### Elixir Side:
+### What We Need ❌
 
-- [ ] Create `Quichex.Listener` GenServer:
-  - [ ] `start_link/1` - starts listener on specified port with config
-  - [ ] `init/1` - opens UDP socket in active mode
-  - [ ] `handle_info({:udp, ...})` - receives packets and dispatches to connections
-  - [ ] Connection routing table (Map: connection_id -> connection_pid)
-  - [ ] Handle new connections:
-    - [ ] Parse header to get DCID
-    - [ ] If DCID unknown, create new connection (call `accept_new_connection/3`)
-    - [ ] If DCID known, route packet to existing connection
-  - [ ] `accept_new_connection/3` - creates new Connection GenServer
-  - [ ] `register_connection/3` - adds connection to routing table
-  - [ ] `unregister_connection/2` - removes from routing table when closed
-  - [ ] Support for address validation (stateless retry):
-    - [ ] Optional: generate and verify retry tokens
-    - [ ] Config option to enable/disable retry
-- [ ] Enhance `Quichex.Connection`:
-  - [ ] Support server-side initialization (different from client)
-  - [ ] Handle `is_server: true` mode
-  - [ ] Connection resource created via `connection_new_server`
-  - [ ] Different initial state (wait for client Initial packet)
-- [ ] Create `Quichex.ConnectionHandler` behaviour:
-  - [ ] `@callback handle_connection(conn :: pid(), peer :: address()) :: :ok | {:error, term()}`
-  - [ ] Allow users to provide custom connection handlers
-- [ ] Listener API:
-  - [ ] `start_link/1` with options: port, config, connection_handler, active mode
-  - [ ] `stop/1` - gracefully stop listener
-  - [ ] `connections/1` - list active connections
+#### 1. Server NIFs (Rust) - **CRITICAL**
 
-#### Tests:
+**File**: `native/quichex_nif/src/connection.rs`
 
-- [ ] Create `test/quichex/listener_test.exs`:
-  - [ ] Test starting listener on specific port
-  - [ ] Test accepting connections from test client
-  - [ ] Test multiple concurrent connections
-  - [ ] Test connection routing (packets go to correct connection)
-  - [ ] Test listener shutdown
-  - [ ] Test connection handler callback
-  - [ ] Test active mode (messages sent to parent process)
-- [ ] Interop test: `quiche-client` connecting to Quichex listener
-  - [ ] Start Quichex listener
-  - [ ] Use `System.cmd` to run `cargo run --bin quiche-client`
-  - [ ] Verify connection succeeds
-  - [ ] Exchange data on streams
+- [ ] `connection_new_server(env, scid: Binary, odcid: Option<Binary>, local_addr: Binary, peer_addr: Binary, config: ResourceArc<ConfigResource>) -> Result<ResourceArc<ConnectionResource>, String>`
+  - Creates server-side quiche::Connection
+  - Uses `quiche::accept()` instead of `quiche::connect()`
+  - Takes optional ODCID (original destination connection ID) for retry packets
+  - **Note**: Use `Binary` for all byte data (connection IDs, addresses)
 
-### Acceptance Criteria:
-- Listener can be started on any available port
-- Listener accepts connections from standard QUIC clients
-- Multiple concurrent connections handled correctly
-- Connection routing works (packets reach correct connection)
-- Can verify interop with `quiche-client` from this repo
-- Connection handler behaviour works
-- Clean shutdown of listener and all connections
+**File**: `native/quichex_nif/src/packet.rs` (new file)
+
+- [ ] `header_info(env, packet: Binary, scid_len: usize) -> Result<HeaderInfo, String>`
+  - Parses QUIC packet header without full processing
+  - Extracts: packet type, version, DCID, SCID, token
+  - Uses `quiche::Header::from_slice()`
+  - Returns Elixir map with header fields
+  - **Critical for routing**: DCID determines which connection handles packet
+
+- [ ] `version_negotiate(env, scid: Binary, dcid: Binary) -> Result<OwnedBinary, String>`
+  - Generates version negotiation packet
+  - Uses `quiche::negotiate_version()`
+  - Returns packet bytes to send
+
+- [ ] `retry(env, scid: Binary, dcid: Binary, new_scid: Binary, token: Binary, version: u32, local_addr: Binary, peer_addr: Binary) -> Result<OwnedBinary, String>`
+  - Generates retry packet for address validation
+  - Uses `quiche::retry()`
+  - Optional feature for DDoS protection
+  - Returns packet bytes to send
+
+**File**: `native/quichex_nif/src/lib.rs`
+
+- [ ] Register new NIFs in `rustler::init!` macro
+- [ ] Export `connection_new_server`, `header_info`, `version_negotiate`, `retry`
+
+**Type Conventions** (CRITICAL):
+- All connection IDs: `Binary` (not `Vec<u8>`)
+- All addresses: Use existing `parse_address_binary()` from types.rs
+- All packet data: `Binary` for input, `OwnedBinary` for output
+- Header info struct: Use `NifStruct` derive for Elixir map conversion
+
+#### 2. Listener GenServer (Elixir) - **CRITICAL**
+
+**File**: `lib/quichex/listener.ex` (new file, ~400 lines estimated)
+
+```elixir
+defmodule Quichex.Listener do
+  use GenServer
+
+  # State: %{
+  #   socket: port(),
+  #   config: %Quichex.Config{},
+  #   connections: %{dcid => conn_pid},  # Routing table
+  #   port: integer(),
+  #   handler: module() | nil
+  # }
+
+  def start_link(opts)
+  # Options: port, config, handler (optional)
+
+  def init(opts)
+  # 1. Open UDP socket on port with active: true
+  # 2. Store config and handler
+  # 3. Initialize empty routing table
+
+  def handle_info({:udp, socket, peer_ip, peer_port, packet}, state)
+  # 1. Parse header with Native.header_info()
+  # 2. Check DCID in routing table
+  # 3. If found: forward packet to existing connection
+  # 4. If not found: accept new connection
+  #    a. Generate new SCID
+  #    b. Create server connection via ConnectionRegistry
+  #    c. Add to routing table
+  #    d. Send packet to new connection for processing
+
+  def handle_call({:register_connection, dcid, conn_pid}, _from, state)
+  # Add connection to routing table
+  # Monitor connection process
+  # Return :ok
+
+  def handle_info({:DOWN, _ref, :process, conn_pid, _reason}, state)
+  # Remove connection from routing table
+  # Cleanup
+
+  # ... other handlers
+end
+```
+
+**Key Design Points**:
+- **Packet Routing**: DCID in header determines destination connection
+- **Connection Creation**: Each new client gets supervised Connection process
+- **Lifecycle**: Listener monitors connections, cleans up on termination
+- **Socket Ownership**: Listener owns socket, passes packets to connections
+- **Handler Integration**: Optional handler for connection acceptance callbacks
+
+#### 3. Server-Side Connection Support (Elixir)
+
+**File**: `lib/quichex/connection.ex` (modifications)
+
+- [ ] Add `mode: :client | :server` to state
+- [ ] Add `:init` state handler for server mode
+  - Server starts in `:init`, waits for first packet
+  - Client skips `:init`, goes straight to `:handshaking`
+- [ ] Modify `init/1` to support server mode:
+  ```elixir
+  def init(opts) do
+    case Keyword.get(opts, :mode, :client) do
+      :client -> init_client(opts)
+      :server -> init_server(opts)
+    end
+  end
+  ```
+- [ ] Add `init_server/1` helper:
+  - Creates server connection with `Native.connection_new_server()`
+  - No socket creation (listener owns socket)
+  - Waits in `:init` state for first packet
+  - Registers SCID with listener
+
+#### 4. Tests
+
+**File**: `test/quichex/listener_test.exs` (new file)
+
+- [ ] Test starting listener on specific port
+- [ ] Test accepting single connection (loopback client)
+- [ ] Test multiple concurrent connections (10+)
+- [ ] Test connection routing (correct packets to correct connections)
+- [ ] Test listener shutdown (all connections terminated)
+- [ ] Test connection lifecycle (register/unregister)
+- [ ] Test handler callbacks (if implemented)
+
+**File**: `test/quichex/integration/server_test.exs` (new file)
+
+- [ ] Test full client-server exchange within same VM
+- [ ] Test stream operations (bidirectional data exchange)
+- [ ] Test concurrent streams on server connections
+- [ ] Test connection closure from both sides
+
+**File**: `test/quichex/integration/interop_test.exs` (update)
+
+- [ ] Test Quichex listener + quiche-client (Rust binary)
+- [ ] Test Quichex client + quiche-server (Rust binary)
+- [ ] Verify interoperability with reference implementation
+
+### Implementation Plan
+
+**Phase 1: Server NIFs** (Est. 1-2 sessions)
+1. Implement `connection_new_server` (reuse client NIF patterns)
+2. Implement `header_info` (packet header parsing)
+3. Implement `version_negotiate` and `retry` (optional, can defer)
+4. Add NIF tests in Rust
+5. Update `lib/quichex/native.ex` with stubs
+
+**Phase 2: Listener GenServer** (Est. 2-3 sessions)
+1. Create basic Listener module with UDP socket
+2. Implement packet routing logic
+3. Implement connection acceptance flow
+4. Add connection monitoring and cleanup
+5. Integration with ConnectionRegistry
+
+**Phase 3: Server Connection Support** (Est. 1 session)
+1. Add server mode to Connection.init/1
+2. Update state machine for server flow
+3. Test server-side handshake
+
+**Phase 4: Testing** (Est. 1-2 sessions)
+1. Unit tests for Listener
+2. Integration tests (loopback)
+3. Interop tests (quiche binaries)
+4. Stress tests (many concurrent connections)
+
+### Acceptance Criteria
+
+- ✅ Listener can start on any available port
+- ✅ Listener accepts connections from Quichex clients (loopback)
+- ✅ Listener accepts connections from quiche-client (interop)
+- ✅ Connection routing works (DCID-based dispatch)
+- ✅ Multiple concurrent connections (100+)
+- ✅ Clean shutdown (listener terminates all connections)
+- ✅ Handler callbacks work (optional)
+- ✅ All tests passing (unit + integration + interop)
+
+### Open Questions
+
+1. **Retry Tokens**: Implement stateless retry for DDoS protection?
+   - Pro: Production-ready security
+   - Con: Adds complexity, can defer to Milestone 6
+   - **Decision**: Defer to Milestone 6 (advanced features)
+
+2. **Connection Limits**: Per-listener connection limits?
+   - **Decision**: Use existing ConnectionRegistry max_connections
+
+3. **Handler Behaviour**: Should Listener have its own handler for accept events?
+   - **Decision**: Yes, simple callback for logging/metrics
+
+### Dependencies
+
+- **Milestone 4**: ✅ Complete (streams working)
+- **quiche crate**: ✅ Already integrated
+- **Supervision tree**: ✅ ConnectionRegistry ready
+
+### Risks
+
+1. **DCID Routing Complexity**: QUIC allows DCID to change during connection
+   - Mitigation: Connection sends updates to Listener when DCID changes
+   - Track in Connection state, notify Listener on change
+
+2. **Socket Ownership**: Who owns the UDP socket? Listener or Connection?
+   - **Decision**: Listener owns socket, passes packets to connections
+   - Connections send packets via Listener (or direct :gen_udp with socket sharing)
+   - **Alternative**: Connections send directly (simpler, same socket multiple writers OK)
+
+3. **Handshake Timeout**: Server connections need timeout if handshake stalls
+   - Mitigation: Reuse existing timeout mechanism from client
+   - Set timeout in `:init` state, cancel when `:connected`
 
 ---
 
