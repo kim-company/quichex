@@ -8,10 +8,14 @@ defmodule Quichex.Handler.Default do
   - `{:quic_connected, conn_pid}`
   - `{:quic_stream_opened, conn_pid, stream_id, direction, stream_type}`
   - `{:quic_stream_readable, conn_pid, stream_id}`
+  - `{:quic_stream_data, conn_pid, stream_id, data, fin}`
   - `{:quic_stream_finished, conn_pid, stream_id}`
   - `{:quic_connection_closed, conn_pid, reason}`
 
   The controlling process defaults to the caller of `start_connection/1`.
+
+  Streams are automatically read when they become readable, and data is delivered
+  via `{:quic_stream_data, ...}` messages.
   """
 
   @behaviour Quichex.Handler
@@ -57,6 +61,14 @@ defmodule Quichex.Handler.Default do
   @impl true
   def handle_stream_readable(conn_pid, stream_id, controlling_process) do
     send(controlling_process, {:quic_stream_readable, conn_pid, stream_id})
+    # Automatically read the stream data
+    actions = [{:read_stream, stream_id, []}]
+    {:ok, controlling_process, actions}
+  end
+
+  @impl true
+  def handle_stream_data(conn_pid, stream_id, data, fin, controlling_process) do
+    send(controlling_process, {:quic_stream_data, conn_pid, stream_id, data, fin})
     {:ok, controlling_process}
   end
 

@@ -61,13 +61,11 @@ The library follows a layered architecture:
 User applications (Phoenix, custom protocols) interact with the public API.
 
 ### Layer 2: Quichex Public API (Elixir)
-- **Quichex.Connection (gen_statem)**: Manages individual QUIC connections using gen_statem with functional core pattern. Each connection runs in its own process for fault isolation and concurrency. States: `:init`, `:handshaking`, `:connected`, `:closed`.
-- **Quichex.State**: Pure functional connection state management.
-- **Quichex.StateMachine**: Pure functional state transitions (no side effects).
+- **Quichex.Connection (gen_statem)**: Manages individual QUIC connections using gen_statem. Each connection runs in its own process for fault isolation and concurrency. States: `:init`, `:handshaking`, `:connected`, `:closed`. State transitions and side effects handled inline for direct data flow.
+- **Quichex.State**: Pure functional connection state management struct.
 - **Quichex.StreamState**: Pure functional stream state (FIN flags, byte counters, flow control).
-- **Quichex.Action**: Side effect system - state machine returns actions, runtime executes them.
-- **Quichex.StreamHandler (GenServer)**: Per-stream processes that handle stream lifecycle and data. Behaviour-based system allows custom stream processing logic.
-- **Quichex.StreamHandler.Default**: Default handler that sends messages to controlling process (imperative API).
+- **Quichex.Handler**: Behaviour for handling connection and stream events with custom logic. Handlers can return actions (send data, refuse streams, etc.) that are executed immediately.
+- **Quichex.Handler.Default**: Default handler that sends messages to controlling process (imperative API).
 - **Quichex.Listener (GenServer)**: Accepts incoming QUIC connections on the server side. Routes packets to appropriate connection processes.
 - **Quichex.Config**: Struct and builder pattern for QUIC configuration (application protocols, flow control, congestion control, TLS settings).
 
@@ -89,20 +87,32 @@ UDP socket I/O for sending and receiving QUIC packets.
 ## Key Design Patterns
 
 ### Process Model
-- Each QUIC connection is a gen_statem process with functional core pattern
+- Each QUIC connection is a gen_statem process with simplified inline state management
 - State machine states: `:init` → `:handshaking` → `:connected` → `:closed`
-- Pure functional state transitions (StateMachine module) separate from side effects (Action system)
+- State transitions and side effects (UDP I/O, timeouts) handled inline for direct data flow
+- Pure functional helpers for complex state transformations
 - Listener is a GenServer that spawns connection processes
 - Supervision tree ensures fault tolerance and crash isolation
 - Socket always in `{active, true}` mode for minimum latency
-- Each stream has a StreamHandler GenServer for handling stream lifecycle and data
-- DefaultStreamHandler provides imperative API, custom handlers enable declarative patterns
+- Connection-level handlers receive callbacks for connection and stream events
+- Handler.Default provides imperative API via messages, custom handlers enable declarative patterns
+- Handlers can return actions that are executed immediately by the connection
 
-### Message Protocol
-Connections always send messages to the controlling process (socket always active):
-- Connection lifecycle: `{:quic_connected, pid}`, `{:quic_connection_error, pid, reason}`, `{:quic_connection_closed, pid, error_code, reason}`
-- Stream data: `{:quic_stream, pid, stream_id, data}`, `{:quic_stream_fin, pid, stream_id}`
-- Datagrams: `{:quic_dgram, pid, data}`
+### Message Protocol (Default Handler)
+The default handler sends these messages to the controlling process:
+- Connection lifecycle: `{:quic_connected, pid}`, `{:quic_connection_closed, pid, reason}`
+- Stream events: `{:quic_stream_opened, pid, stream_id, direction, type}`, `{:quic_stream_readable, pid, stream_id}`
+- Stream data: `{:quic_stream_data, pid, stream_id, data, fin}` (automatically read when readable)
+- Stream finished: `{:quic_stream_finished, pid, stream_id}`
+
+### Handler Actions
+Handlers can return actions for declarative control:
+- `{:read_stream, stream_id, opts}` - Read data from stream (triggers `handle_stream_data` callback)
+- `{:send_data, stream_id, data, opts}` - Send data on stream
+- `{:refuse_stream, stream_id, error_code}` - Refuse incoming stream
+- `{:open_stream, opts}` - Open new stream
+- `{:shutdown_stream, stream_id, direction, error_code}` - Shutdown stream
+- `{:close_connection, error_code, reason}` - Close connection
 
 ### Resource Management
 - Rust resources (Config, Connection) managed via Rustler's ResourceArc
@@ -178,49 +188,55 @@ After comprehensive API audit, we've established these conventions:
 
 ## Project Status
 
-**Current Status**: Architecture Simplified - StreamHandler Complete ✅
+**Current Status**: Architecture Simplified - Inline State Transitions ✅
 
-The project has a clean, simplified architecture after removing active/passive mode complexity:
+The project has a clean, simplified architecture with direct data flow:
 
-- **Architecture**: gen_statem + functional core + StreamHandler per-stream processes
-- **Concurrency**: Each stream runs in its own StreamHandler GenServer
-- **Simplicity**: Socket always active, immediate data delivery, no buffering
-- **Test Coverage**: 74/74 tests passing (100% pass rate)
+- **Architecture**: gen_statem with inline state transitions and side effects
+- **Simplicity**: Direct packet processing, no action queue, immediate execution
+- **Handler System**: Connection-level handlers with optional action returns
+- **Test Coverage**: 74/75 tests passing (98.7% pass rate)
 - **API Consistency**: All Elixir<->Rust byte data uses Binary (zero-copy performance)
 
 ### Recent Work (Dec 2025)
 
-✅ **Active/Passive Mode Removal**
-- Removed ~2,000 lines of complexity (500 implementation + 1,650 tests)
-- Socket always in `{active, true}` mode for minimum latency
-- Simplified data flow: Socket → Connection → StreamHandler (immediate)
-- Users implement buffering in custom handlers if needed
+✅ **Architecture Simplification**
+- Merged StateMachine into Connection (~350 lines removed)
+- Removed Action queue pattern for immediate side effect execution
+- Simplified data flow: UDP packet → Process inline → Send response
+- Handler actions executed immediately (send data, refuse streams, etc.)
 
-✅ **StreamHandler Architecture**
-- Each stream has a dedicated StreamHandler GenServer
-- DefaultStreamHandler provides imperative API (messages to controlling process)
-- Custom handlers enable declarative patterns (callbacks for data processing)
-- Clean separation: Connection handles protocol, Handlers handle application logic
+✅ **Handler Enhancements**
+- Handlers can return actions: `{:ok, state, actions}`
+- Available actions: read_stream, send_data, refuse_stream, open_stream, close_connection, shutdown_stream
+- Actions executed immediately by connection for direct feedback
+- Declarative stream reading: handlers request reads via actions, receive data via callbacks
+- Handler.Default auto-reads streams and sends `:quic_stream_data` messages
+
+✅ **Active Mode Only**
+- Socket always in `{active, true}` mode for minimum latency
+- Immediate data delivery, no buffering
+- Users implement buffering in custom handlers if needed
 
 ### Implementation Phases
 
 ✅ **Phase 1-2: Functional Core & gen_statem**
-- Pure functional state management (State, StateMachine, StreamState, Action)
+- Pure functional state management (State, StreamState)
 - Migrated from GenServer to gen_statem with state_functions callback mode
-- 100% test pass rate achieved
+- Connection handles protocol, Handlers handle application logic
 
-✅ **Phase 3: StreamHandler Architecture**
-- Per-stream GenServer processes for handling stream lifecycle
-- Behaviour-based handler system for custom stream processing
-- DefaultStreamHandler for backward compatibility with imperative API
-- Simplified architecture after removing active/passive mode (Dec 2025)
+✅ **Phase 3: Architecture Simplification**
+- Merged StateMachine logic into Connection for clarity
+- Removed action queue for immediate execution
+- Enhanced Handler behaviour with action returns
+- Maintained functional helpers for complex transformations
 
 ### Milestones (see PLAN.md)
 
 1. ✅ Project Scaffolding
 2. ✅ Config and Core NIFs
 3. ✅ Client Connection Establishment
-4. ✅ Stream Operations (StreamHandler architecture)
+4. ✅ Stream Operations (simplified architecture)
 5. ⏳ Server-Side Listener
 6. ⏳ Advanced Features (datagrams, migration, stats)
 7. ⏳ Production Hardening
@@ -242,8 +258,8 @@ The project has a clean, simplified architecture after removing active/passive m
 ### Elixir Style
 - Follow standard Elixir formatting (configured in `.formatter.exs`)
 - Use gen_statem for complex state machines (Connection), GenServer for simpler processes
-- Prefer functional core pattern: pure state transitions + action system for side effects
-- Prefer pipeline operators for configuration builders
+- Prefer functional helpers for complex state transformations, inline side effects for simplicity
+- Prefer pipeline operators for configuration builders and data transformations
 - Document all public functions with examples
 
 ### Rust Style

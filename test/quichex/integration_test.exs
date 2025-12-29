@@ -4,6 +4,7 @@ defmodule Quichex.IntegrationTest do
   alias Quichex.{Config, Connection}
 
   @moduletag :integration
+  @moduletag :external  # These tests connect to cloudflare-quic.com - skip by default
   @moduletag timeout: 30_000
 
   describe "real server integration" do
@@ -115,9 +116,18 @@ defmodule Quichex.IntegrationTest do
       # We might not receive stream data (server might not respond to our non-HTTP/3 data)
       # But we can verify the notification system works
       receive do
-        {:quic_stream_readable, ^conn, readable_stream_id} ->
-          # If we get a readable notification, try reading
-          {:ok, {_data, _fin}} = Connection.stream_recv(conn, readable_stream_id)
+        {:quic_stream_readable, ^conn, _readable_stream_id} ->
+          # Stream became readable - default handler will auto-read it
+          # Wait for the data message
+          receive do
+            {:quic_stream_data, ^conn, _stream_id, _data, _fin} ->
+              :ok
+          after
+            1_000 -> :ok
+          end
+
+        {:quic_stream_data, ^conn, _stream_id, _data, _fin} ->
+          # Got data directly
           :ok
 
         {:quic_stream_closed, ^conn, _stream_id, _error_code} ->

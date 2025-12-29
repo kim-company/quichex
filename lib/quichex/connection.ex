@@ -15,18 +15,18 @@ defmodule Quichex.Connection do
 
   ## Architecture
 
-  This module uses a functional core pattern:
+  This module implements a simplified gen_statem with inline state transitions:
   - Pure state management in `Quichex.State`
-  - Pure state transitions in `Quichex.StateMachine`
-  - Side effects (UDP I/O, messages) executed via actions
+  - State transitions and side effects handled inline in state callbacks
+  - Handler actions executed immediately
 
-  This allows for better testability and performance optimization.
+  This provides a clear, direct data flow with minimal indirection.
   """
 
   @behaviour :gen_statem
   require Logger
 
-  alias Quichex.{State, StateMachine, Action, Native}
+  alias Quichex.{State, StreamState, Native}
 
   ## Public API
 
@@ -330,12 +330,11 @@ defmodule Quichex.Connection do
   end
 
   def init(:state_timeout, :start_handshake, data) do
-    # Use state machine to generate initial packets
-    new_data = StateMachine.start_handshake(data)
-    {actions, new_data} = State.take_actions(new_data)
-
-    # Execute actions and get updated state
-    updated_data = execute_actions(actions, new_data)
+    # Generate and send initial packets, schedule timeout
+    updated_data =
+      data
+      |> generate_and_send_packets()
+      |> schedule_next_timeout()
 
     # Transition to handshaking
     {:next_state, :handshaking, updated_data}
@@ -353,12 +352,25 @@ defmodule Quichex.Connection do
   end
 
   def handshaking(:info, {:udp, socket, _ip, _port, packet}, %State{socket: socket} = data) do
-    # Process packet
-    new_data = StateMachine.process_packet(data, packet)
-    {actions, new_data} = State.take_actions(new_data)
+    # Process packet inline
+    recv_info = %{from: data.peer_addr, to: data.local_addr}
 
-    # Execute actions and get updated state
-    updated_data = execute_actions(actions, new_data)
+    updated_data = case Native.connection_recv(data.conn_resource, packet, recv_info) do
+      {:ok, _bytes_read} ->
+        data
+        |> State.increment_packets_received()
+        |> check_if_established()
+        |> process_readable_streams()
+        |> generate_and_send_packets()
+        |> schedule_next_timeout()
+
+      {:error, "done"} ->
+        data
+
+      {:error, reason} ->
+        Logger.error("Packet processing error: #{inspect(reason)}")
+        State.mark_closed(data, {:recv_error, reason})
+    end
 
     # Detect connection established event
     updated_data =
@@ -378,11 +390,17 @@ defmodule Quichex.Connection do
 
   def handshaking(:info, :quic_timeout, data) do
     # Handle timeout during handshake
-    new_data = StateMachine.handle_timeout(data)
-    {actions, new_data} = State.take_actions(new_data)
+    updated_data = case Native.connection_on_timeout(data.conn_resource) do
+      {:ok, _} ->
+        data
+        |> generate_and_send_packets()
+        |> process_readable_streams()
+        |> schedule_next_timeout()
 
-    # Execute actions and get updated state
-    updated_data = execute_actions(actions, new_data)
+      {:error, reason} ->
+        Logger.error("Timeout handling error: #{inspect(reason)}")
+        State.mark_closed(data, {:timeout_error, reason})
+    end
 
     {:keep_state, updated_data}
   end
@@ -458,12 +476,25 @@ defmodule Quichex.Connection do
   end
 
   def connected(:info, {:udp, socket, _ip, _port, packet}, %State{socket: socket} = data) do
-    # Process packet with state machine
-    new_data = StateMachine.process_packet(data, packet)
-    {actions, new_data} = State.take_actions(new_data)
+    # Process packet inline
+    recv_info = %{from: data.peer_addr, to: data.local_addr}
 
-    # Execute actions and get updated state
-    updated_data = execute_actions(actions, new_data)
+    updated_data = case Native.connection_recv(data.conn_resource, packet, recv_info) do
+      {:ok, _bytes_read} ->
+        data
+        |> State.increment_packets_received()
+        |> check_if_established()
+        |> process_readable_streams()
+        |> generate_and_send_packets()
+        |> schedule_next_timeout()
+
+      {:error, "done"} ->
+        data
+
+      {:error, reason} ->
+        Logger.error("Packet processing error: #{inspect(reason)}")
+        State.mark_closed(data, {:recv_error, reason})
+    end
 
     # Detect new streams (stream_opened events)
     old_stream_ids = MapSet.new(Map.keys(data.streams))
@@ -495,12 +526,18 @@ defmodule Quichex.Connection do
   end
 
   def connected(:info, :quic_timeout, data) do
-    # Handle timeout
-    new_data = StateMachine.handle_timeout(data)
-    {actions, new_data} = State.take_actions(new_data)
+    # Handle timeout inline
+    updated_data = case Native.connection_on_timeout(data.conn_resource) do
+      {:ok, _} ->
+        data
+        |> generate_and_send_packets()
+        |> process_readable_streams()
+        |> schedule_next_timeout()
 
-    # Execute actions and get updated state
-    updated_data = execute_actions(actions, new_data)
+      {:error, reason} ->
+        Logger.error("Timeout handling error: #{inspect(reason)}")
+        State.mark_closed(data, {:timeout_error, reason})
+    end
 
     {:keep_state, updated_data}
   end
@@ -519,7 +556,7 @@ defmodule Quichex.Connection do
 
   def connected({:call, from}, {:open_stream, opts}, data) when is_list(opts) do
     type = Keyword.get(opts, :type, :bidirectional)
-    {stream_id, new_data} = StateMachine.open_stream(data, type)
+    {stream_id, new_data} = do_open_stream(data, type)
     {:keep_state, new_data, [{:reply, from, {:ok, stream_id}}]}
   end
 
@@ -536,8 +573,8 @@ defmodule Quichex.Connection do
       {:ok, {stream_data, fin}} ->
         # Update stream state
         {stream, new_data} = State.get_or_create_stream(data, stream_id, :bidirectional)
-        stream = Quichex.StreamState.add_bytes_received(stream, byte_size(stream_data))
-        stream = if fin, do: Quichex.StreamState.mark_fin_received(stream), else: stream
+        stream = StreamState.add_bytes_received(stream, byte_size(stream_data))
+        stream = if fin, do: StreamState.mark_fin_received(stream), else: stream
         new_data = State.update_stream(new_data, stream)
 
         {:keep_state, new_data, [{:reply, from, {:ok, {stream_data, fin}}}]}
@@ -555,16 +592,12 @@ defmodule Quichex.Connection do
       {:ok, bytes_written} ->
         # Update stream state
         {stream, new_data} = State.get_or_create_stream(data, stream_id, :bidirectional)
-        stream = Quichex.StreamState.add_bytes_sent(stream, bytes_written)
-        stream = if fin, do: Quichex.StreamState.mark_fin_sent(stream), else: stream
+        stream = StreamState.add_bytes_sent(stream, bytes_written)
+        stream = if fin, do: StreamState.mark_fin_sent(stream), else: stream
         new_data = State.update_stream(new_data, stream)
 
-        # Generate packets
-        new_data = StateMachine.generate_pending_packets(new_data)
-
-        # Execute actions (will send UDP packets)
-        {actions, new_data} = State.take_actions(new_data)
-        updated_data = execute_actions(actions, new_data)
+        # Generate and send packets inline
+        updated_data = generate_and_send_packets(new_data)
 
         {:keep_state, updated_data, [{:reply, from, {:ok, bytes_written}}]}
 
@@ -585,11 +618,7 @@ defmodule Quichex.Connection do
   end
 
   def connected({:call, from}, {:stream_shutdown, stream_id, direction, error_code}, data) do
-    new_data = StateMachine.stream_shutdown(data, stream_id, direction, error_code)
-    {actions, new_data} = State.take_actions(new_data)
-
-    updated_data = execute_actions(actions, new_data)
-
+    updated_data = do_stream_shutdown(data, stream_id, direction, error_code)
     {:keep_state, updated_data, [{:reply, from, :ok}]}
   end
 
@@ -800,20 +829,6 @@ defmodule Quichex.Connection do
     <<s0::16, s1::16, s2::16, s3::16, s4::16, s5::16, s6::16, s7::16, port::16>>
   end
 
-  defp execute_actions(actions, data) do
-    context = %{
-      socket: data.socket,
-      conn_resource: data.conn_resource
-    }
-
-    # Reduce over actions, updating state and performing side effects
-    Enum.reduce(actions, data, fn action, acc_data ->
-      # All actions delegated to Action module
-      Action.execute(action, context)
-      acc_data
-    end)
-  end
-
   # Handler callback helper
   defp call_handler(_callback_name, _args, %{handler_module: nil} = data) do
     # No handler configured, just return data unchanged
@@ -825,6 +840,10 @@ defmodule Quichex.Connection do
       case apply(data.handler_module, callback_name, args ++ [data.handler_state]) do
         {:ok, new_handler_state} ->
           %{data | handler_state: new_handler_state}
+
+        {:ok, new_handler_state, actions} when is_list(actions) ->
+          data = %{data | handler_state: new_handler_state}
+          execute_handler_actions(actions, data)
 
         other ->
           Logger.warning(
@@ -838,6 +857,216 @@ defmodule Quichex.Connection do
         Logger.error("Handler callback #{callback_name} crashed: #{inspect(e)}")
         reraise e, __STACKTRACE__
     end
+  end
+
+  # Execute handler actions immediately
+  defp execute_handler_actions(actions, state) when is_list(actions) do
+    Enum.reduce(actions, state, &execute_handler_action/2)
+  end
+
+  defp execute_handler_action({:send_data, stream_id, data, opts}, state) do
+    fin = Keyword.get(opts, :fin, false)
+
+    case do_stream_send(state, stream_id, data, fin) do
+      {:ok, new_state} -> new_state
+      {:error, reason} ->
+        Logger.debug("Handler action send_data failed: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp execute_handler_action({:read_stream, stream_id, opts}, state) do
+    max_bytes = Keyword.get(opts, :max_bytes, state.stream_recv_buffer_size)
+
+    case Native.connection_stream_recv(state.conn_resource, stream_id, max_bytes) do
+      {:ok, {stream_data, fin}} ->
+        # Update stream state
+        {stream, new_state} = State.get_or_create_stream(state, stream_id, :bidirectional)
+        stream = StreamState.add_bytes_received(stream, byte_size(stream_data))
+        stream = if fin, do: StreamState.mark_fin_received(stream), else: stream
+        new_state = State.update_stream(new_state, stream)
+
+        # Call handler with the data (if callback is implemented)
+        if state.handler_module && function_exported?(state.handler_module, :handle_stream_data, 5) do
+          call_handler(:handle_stream_data, [self(), stream_id, stream_data, fin], new_state)
+        else
+          new_state
+        end
+
+      {:error, reason} ->
+        Logger.debug("Handler action read_stream failed on stream #{stream_id}: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp execute_handler_action({:refuse_stream, stream_id, error_code}, state) do
+    do_stream_shutdown(state, stream_id, :both, error_code)
+  end
+
+  defp execute_handler_action({:open_stream, opts}, state) do
+    type = Keyword.get(opts, :type, :bidirectional)
+    {_stream_id, new_state} = do_open_stream(state, type)
+    new_state
+  end
+
+  defp execute_handler_action({:close_connection, error_code, reason}, state) do
+    case Native.connection_close(state.conn_resource, true, error_code, reason) do
+      {:ok, _} -> State.mark_closed(state, :normal)
+      _ -> state
+    end
+  end
+
+  defp execute_handler_action({:shutdown_stream, stream_id, direction, error_code}, state) do
+    do_stream_shutdown(state, stream_id, direction, error_code)
+  end
+
+  defp execute_handler_action(unknown, state) do
+    Logger.warning("Unknown handler action: #{inspect(unknown)}")
+    state
+  end
+
+  # Helper functions merged from StateMachine
+
+  defp do_open_stream(%State{} = state, :bidirectional) do
+    {stream_id, state} = State.allocate_bidi_stream(state)
+    {stream, state} = State.get_or_create_stream(state, stream_id, :bidirectional)
+    {stream_id, State.update_stream(state, stream)}
+  end
+
+  defp do_open_stream(%State{} = state, :unidirectional) do
+    {stream_id, state} = State.allocate_uni_stream(state)
+    {stream, state} = State.get_or_create_stream(state, stream_id, :unidirectional)
+    {stream_id, State.update_stream(state, stream)}
+  end
+
+  defp do_stream_send(%State{} = state, stream_id, data, fin) when is_binary(data) do
+    case Native.connection_stream_send(state.conn_resource, stream_id, data, fin) do
+      {:ok, _bytes_written} ->
+        # Update stream state
+        {stream, state} = State.get_or_create_stream(state, stream_id, :bidirectional)
+
+        stream =
+          stream
+          |> StreamState.add_bytes_sent(byte_size(data))
+          |> (fn s -> if fin, do: StreamState.mark_fin_sent(s), else: s end).()
+
+        new_state =
+          state
+          |> State.update_stream(stream)
+          |> generate_and_send_packets()
+
+        {:ok, new_state}
+
+      {:error, reason} ->
+        Logger.debug("Stream send failed on stream #{stream_id}: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp do_stream_shutdown(%State{} = state, stream_id, direction, error_code)
+       when direction in [:read, :write, :both] do
+    direction_str =
+      case direction do
+        :read -> "read"
+        :write -> "write"
+        :both -> "both"
+      end
+
+    case Native.connection_stream_shutdown(state.conn_resource, stream_id, direction_str, error_code) do
+      {:ok, _} ->
+        generate_and_send_packets(state)
+
+      {:error, reason} ->
+        Logger.warning("Stream shutdown error on stream #{stream_id}: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp check_if_established(%State{established: true} = state), do: state
+
+  defp check_if_established(%State{established: false} = state) do
+    case Native.connection_is_established(state.conn_resource) do
+      {:ok, true} ->
+        Logger.debug("Connection established")
+        state = State.mark_established(state)
+        reply_to_waiters(state, :ok)
+
+      _ ->
+        state
+    end
+  end
+
+  defp process_readable_streams(%State{} = state) do
+    case Native.connection_readable_streams(state.conn_resource) do
+      {:ok, readable_streams} ->
+        state = %{state | readable_streams: readable_streams}
+
+        # Update state with new streams if any
+        Enum.reduce(readable_streams, state, fn stream_id, acc ->
+          if not Map.has_key?(acc.streams, stream_id) do
+            {_stream, new_state} = State.get_or_create_stream(acc, stream_id, :bidirectional)
+            new_state
+          else
+            acc
+          end
+        end)
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  defp generate_and_send_packets(state) do
+    packets = collect_packets_recursive(state.conn_resource, [])
+
+    unless packets == [] do
+      send_udp_packets(state.socket, packets)
+    end
+
+    State.increment_packets_sent(state, length(packets))
+  end
+
+  defp collect_packets_recursive(conn_resource, acc) do
+    case Native.connection_send(conn_resource) do
+      {:ok, {packet, send_info}} ->
+        collect_packets_recursive(conn_resource, [{packet, send_info} | acc])
+
+      {:error, "done"} ->
+        Enum.reverse(acc)
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  defp send_udp_packets(_socket, []), do: :ok
+
+  defp send_udp_packets(socket, packets) do
+    Enum.each(packets, fn {packet, send_info} ->
+      {to_ip, to_port} = send_info.to
+      :gen_udp.send(socket, to_ip, to_port, packet)
+    end)
+  end
+
+  defp schedule_next_timeout(state) do
+    case Native.connection_timeout(state.conn_resource) do
+      {:ok, timeout_ms} when is_integer(timeout_ms) ->
+        Process.send_after(self(), :quic_timeout, timeout_ms)
+        state
+
+      _ ->
+        state
+    end
+  end
+
+  defp reply_to_waiters(%State{waiters: []} = state, _response), do: state
+
+  defp reply_to_waiters(%State{waiters: waiters} = state, response) do
+    Enum.each(waiters, fn from ->
+      :gen_statem.reply(from, response)
+    end)
+
+    %{state | waiters: []}
   end
 
 end

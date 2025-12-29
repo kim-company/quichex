@@ -4,6 +4,7 @@ defmodule Quichex.StreamTest do
   alias Quichex.{Config, Connection}
 
   @moduletag :stream
+  @moduletag :external  # These tests connect to cloudflare-quic.com - skip by default
 
   describe "stream operations" do
     setup do

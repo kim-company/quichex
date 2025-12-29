@@ -6,10 +6,8 @@ defmodule Quichex.State do
   - Connection resource (NIF reference to quiche connection)
   - Network addresses (local and peer)
   - Stream states
-  - Pending actions to be executed
 
-  All state transformations are pure functions. The state machine operates
-  on this struct and returns `{new_state, actions}` tuples.
+  All state transformations are pure functions that return updated state.
 
   ## Socket Mode
 
@@ -17,7 +15,7 @@ defmodule Quichex.State do
   Socket notifications sent immediately - no buffering.
   """
 
-  alias Quichex.{StreamState, Action}
+  alias Quichex.StreamState
 
   @type workload_mode :: :http | :webtransport | :auto
 
@@ -49,9 +47,6 @@ defmodule Quichex.State do
           next_uni_stream: non_neg_integer(),
           streams: %{StreamState.stream_id() => StreamState.t()},
           readable_streams: [StreamState.stream_id()],
-
-          # Actions queue
-          pending_actions: [Action.t()],
 
           # Timeout management
           timeout_ref: reference() | nil,
@@ -85,7 +80,6 @@ defmodule Quichex.State do
             next_uni_stream: 0,
             streams: %{},
             readable_streams: [],
-            pending_actions: [],
             timeout_ref: nil,
             mode: :auto,
             stream_recv_buffer_size: 16384,
@@ -121,33 +115,6 @@ defmodule Quichex.State do
       mode: Keyword.get(opts, :mode, :auto),
       stream_recv_buffer_size: Keyword.get(opts, :stream_recv_buffer_size, 16384)
     }
-  end
-
-  @doc """
-  Adds an action to the pending actions queue.
-  """
-  @spec add_action(t(), Action.t()) :: t()
-  def add_action(%__MODULE__{} = state, action) do
-    %{state | pending_actions: [action | state.pending_actions]}
-  end
-
-  @doc """
-  Adds multiple actions to the pending actions queue.
-  """
-  @spec add_actions(t(), [Action.t()]) :: t()
-  def add_actions(%__MODULE__{} = state, actions) when is_list(actions) do
-    %{state | pending_actions: actions ++ state.pending_actions}
-  end
-
-  @doc """
-  Clears and returns the pending actions.
-
-  Returns a tuple of `{actions, updated_state}` where actions are in execution order
-  (reversed from the queue which is built with prepending).
-  """
-  @spec take_actions(t()) :: {[Action.t()], t()}
-  def take_actions(%__MODULE__{pending_actions: actions} = state) do
-    {Enum.reverse(actions), %{state | pending_actions: []}}
   end
 
   @doc """
@@ -214,20 +181,6 @@ defmodule Quichex.State do
   @spec add_waiter(t(), :gen_statem.from()) :: t()
   def add_waiter(%__MODULE__{} = state, from) do
     %{state | waiters: [from | state.waiters]}
-  end
-
-  @doc """
-  Replies to all waiters and clears the waiter list.
-
-  Generates reply actions for all waiters.
-  """
-  @spec reply_to_waiters(t(), term()) :: t()
-  def reply_to_waiters(%__MODULE__{waiters: []} = state, _response), do: state
-
-  def reply_to_waiters(%__MODULE__{waiters: waiters} = state, response) do
-    actions = Enum.map(waiters, fn from -> {:reply, from, response} end)
-    state = %{state | waiters: []}
-    add_actions(state, actions)
   end
 
   @doc """
