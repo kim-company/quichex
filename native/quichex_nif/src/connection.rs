@@ -369,9 +369,13 @@ pub fn connection_stream_send(
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?;
 
-    connection
-        .stream_send(stream_id, data.as_slice(), fin)
-        .map_err(|e| format!("Stream send error: {}", quiche_error_to_string(e)))
+    match connection.stream_send(stream_id, data.as_slice(), fin) {
+        Ok(bytes_written) => Ok(bytes_written),
+        // Done means flow control exhausted - return 0 bytes written, not an error
+        Err(quiche::Error::Done) => Ok(0),
+        // All other errors are real errors
+        Err(e) => Err(format!("Stream send error: {}", quiche_error_to_string(e))),
+    }
 }
 
 /// Receives data from a stream

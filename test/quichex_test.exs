@@ -1,5 +1,5 @@
 defmodule QuichexTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: true
   doctest Quichex
 
   test "returns version" do

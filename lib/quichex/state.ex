@@ -51,6 +51,10 @@ defmodule Quichex.State do
           next_uni_stream: non_neg_integer(),
           streams: %{StreamState.stream_id() => StreamState.t()},
           readable_streams: [StreamState.stream_id()],
+          # Partial sends tracking (for flow control handling)
+          partial_sends: %{StreamState.stream_id() => {binary(), boolean()}},
+          # Send queues for each stream (FIFO queue of pending sends)
+          send_queues: %{StreamState.stream_id() => :queue.queue({binary(), boolean()})},
 
           # Timeout management
           timeout_ref: reference() | nil,
@@ -87,6 +91,8 @@ defmodule Quichex.State do
             next_uni_stream: 0,
             streams: %{},
             readable_streams: [],
+            partial_sends: %{},
+            send_queues: %{},
             timeout_ref: nil,
             mode: :auto,
             stream_recv_buffer_size: 16384,

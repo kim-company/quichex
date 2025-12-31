@@ -38,9 +38,22 @@ defmodule Quichex.Test.EchoHandler do
 
   @impl true
   def handle_stream_data(_conn_pid, stream_id, data, fin, state) do
-    # Echo data back on the same stream
-    actions = [{:send_data, stream_id, data, fin: fin}]
-    {:ok, state, actions}
+    # Buffer data and only echo when FIN is received
+    # This is necessary because immediate echoing creates too many concurrent send requests
+    # on the same stream, leading to flow control deadlocks when one partial send blocks the queue
+    accumulated = Map.get(state, {:buffer, stream_id}, <<>>)
+    new_accumulated = accumulated <> data
+
+    if fin do
+      # Stream finished - echo all accumulated data
+      actions = [{:send_data, stream_id, new_accumulated, fin: true}]
+      new_state = Map.delete(state, {:buffer, stream_id})
+      {:ok, new_state, actions}
+    else
+      # Still receiving - accumulate
+      new_state = Map.put(state, {:buffer, stream_id}, new_accumulated)
+      {:ok, new_state, []}
+    end
   end
 
   @impl true

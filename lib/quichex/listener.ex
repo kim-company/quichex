@@ -261,10 +261,16 @@ defmodule Quichex.Listener do
 
   @impl true
   def terminate(_reason, state) do
-    # Close socket
-    if state.socket do
-      :gen_udp.close(state.socket)
+    # Close all active connections gracefully
+    for {_dcid, conn_pid} <- state.connections do
+      if Process.alive?(conn_pid) do
+        Quichex.Connection.close(conn_pid, error_code: 0, reason: "Listener shutting down")
+      end
     end
+
+    # Don't close the socket here - let server connections send their final CONNECTION_CLOSE frames
+    # The socket will be garbage collected when all processes holding references to it are done
+    # This allows server connections to properly notify clients before shutting down
 
     :ok
   end

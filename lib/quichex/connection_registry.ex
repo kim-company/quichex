@@ -98,7 +98,14 @@ defmodule Quichex.ConnectionRegistry do
       end
 
     # Start ConnectionSupervisor (which starts Connection)
-    case DynamicSupervisor.start_child(__MODULE__, {Quichex.ConnectionSupervisor, opts_with_defaults}) do
+    # Use temporary restart to prevent supervisor from restarting crashed connections
+    child_spec = %{
+      id: Quichex.ConnectionSupervisor,
+      start: {Quichex.ConnectionSupervisor, :start_link, [opts_with_defaults]},
+      restart: :temporary
+    }
+
+    case DynamicSupervisor.start_child(__MODULE__, child_spec) do
       {:ok, conn_sup_pid} ->
         # Get the Connection PID from ConnectionSupervisor children
         case get_connection_pid(conn_sup_pid) do

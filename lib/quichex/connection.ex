@@ -28,6 +28,21 @@ defmodule Quichex.Connection do
 
   alias Quichex.{State, StreamState, Native}
 
+  @doc """
+  Returns a child specification for starting Connection under a supervisor.
+
+  This function is required for using Connection with ExUnit's
+  `start_link_supervised!/1` and with Elixir supervisors.
+  """
+  def child_spec(opts) do
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [opts]},
+      type: :worker,
+      restart: :temporary
+    }
+  end
+
   ## Public API
 
   @doc """
@@ -414,9 +429,10 @@ defmodule Quichex.Connection do
         data
         |> State.increment_packets_received()
         |> check_if_established()
-        |> process_readable_streams()
+        |> check_if_peer_closed()
+        |> process_all_readable_streams()
+        |> process_writable_streams()
         |> generate_and_send_packets()
-        |> schedule_next_timeout()
 
       {:error, "done"} ->
         data
@@ -448,7 +464,8 @@ defmodule Quichex.Connection do
       {:ok, _} ->
         data
         |> generate_and_send_packets()
-        |> process_readable_streams()
+        |> process_all_readable_streams()
+        |> process_writable_streams()
         |> schedule_next_timeout()
 
       {:error, reason} ->
@@ -496,7 +513,12 @@ defmodule Quichex.Connection do
 
     case Native.connection_close(data.conn_resource, true, error_code, reason_bytes) do
       {:ok, _} ->
-        new_data = State.mark_closed(data, :normal)
+        # Generate and send close packets before transitioning
+        new_data =
+          data
+          |> State.mark_closed(:normal)
+          |> generate_and_send_packets()
+
         {:next_state, :closed, new_data, [{:reply, from, :ok}]}
 
       # "done" error means connection isn't ready, but we're closing anyway
@@ -538,9 +560,10 @@ defmodule Quichex.Connection do
         data
         |> State.increment_packets_received()
         |> check_if_established()
+        |> check_if_peer_closed()
         |> process_readable_streams()
+        |> process_writable_streams()
         |> generate_and_send_packets()
-        |> schedule_next_timeout()
 
       {:error, "done"} ->
         data
@@ -566,10 +589,12 @@ defmodule Quichex.Connection do
       end)
 
     # Detect readable streams (stream_readable events)
-    updated_data =
-      Enum.reduce(updated_data.readable_streams, updated_data, fn stream_id, acc ->
-        call_handler(:handle_stream_readable, [self(), stream_id], acc)
-      end)
+    # Process readable streams repeatedly until all data is drained
+    updated_data = process_all_readable_streams(updated_data)
+
+    # Process writable streams to continue any partial sends
+    # This handles large data transfers that exceeded flow control window
+    updated_data = process_writable_streams(updated_data)
 
     # Check if connection is still open
     if updated_data.closed do
@@ -585,7 +610,8 @@ defmodule Quichex.Connection do
       {:ok, _} ->
         data
         |> generate_and_send_packets()
-        |> process_readable_streams()
+        |> process_all_readable_streams()
+        |> process_writable_streams()
         |> schedule_next_timeout()
 
       {:error, reason} ->
@@ -641,14 +667,31 @@ defmodule Quichex.Connection do
   # New API: stream_send - send data on a stream
   def connected({:call, from}, {:stream_send, stream_id, data_bytes, opts}, data) do
     fin = Keyword.get(opts, :fin, false)
+    data_size = byte_size(data_bytes)
 
     case Native.connection_stream_send(data.conn_resource, stream_id, data_bytes, fin) do
       {:ok, bytes_written} ->
         # Update stream state
         {stream, new_data} = State.get_or_create_stream(data, stream_id, :bidirectional)
         stream = StreamState.add_bytes_sent(stream, bytes_written)
-        stream = if fin, do: StreamState.mark_fin_sent(stream), else: stream
+
+        # Only mark FIN as sent if we wrote ALL the data
+        # Per QUIC spec and quiche behavior: FIN is only sent with the last byte
+        stream = if fin and bytes_written == data_size do
+          StreamState.mark_fin_sent(stream)
+        else
+          stream
+        end
+
         new_data = State.update_stream(new_data, stream)
+
+        # If partial write, store remaining data for later
+        new_data = if bytes_written < data_size do
+          remaining = binary_part(data_bytes, bytes_written, data_size - bytes_written)
+          %{new_data | partial_sends: Map.put(new_data.partial_sends, stream_id, {remaining, fin})}
+        else
+          new_data
+        end
 
         # Generate and send packets inline
         updated_data = generate_and_send_packets(new_data)
@@ -684,7 +727,12 @@ defmodule Quichex.Connection do
 
     case Native.connection_close(data.conn_resource, true, error_code, reason_bytes) do
       {:ok, _} ->
-        new_data = State.mark_closed(data, :normal)
+        # Generate and send close packets before transitioning
+        new_data =
+          data
+          |> State.mark_closed(:normal)
+          |> generate_and_send_packets()
+
         {:next_state, :closed, new_data, [{:reply, from, :ok}]}
 
       # "done" error means connection isn't ready, but we're closing anyway
@@ -723,7 +771,7 @@ defmodule Quichex.Connection do
     updated_data = call_handler(:handle_connection_closed, [self(), data.close_reason || :normal], data)
 
     # Schedule stop after a short delay to allow final calls
-    {:keep_state, updated_data, [{:state_timeout, 1000, :stop}]}
+    {:keep_state, updated_data, [{:state_timeout, 50, :stop}]}
   end
 
   def closed(:state_timeout, :stop, _data) do
@@ -1013,26 +1061,8 @@ defmodule Quichex.Connection do
 
   defp execute_handler_action({:read_stream, stream_id, opts}, state) do
     max_bytes = Keyword.get(opts, :max_bytes, state.stream_recv_buffer_size)
-
-    case Native.connection_stream_recv(state.conn_resource, stream_id, max_bytes) do
-      {:ok, {stream_data, fin}} ->
-        # Update stream state
-        {stream, new_state} = State.get_or_create_stream(state, stream_id, :bidirectional)
-        stream = StreamState.add_bytes_received(stream, byte_size(stream_data))
-        stream = if fin, do: StreamState.mark_fin_received(stream), else: stream
-        new_state = State.update_stream(new_state, stream)
-
-        # Call handler with the data (if callback is implemented)
-        if state.handler_module && function_exported?(state.handler_module, :handle_stream_data, 5) do
-          call_handler(:handle_stream_data, [self(), stream_id, stream_data, fin], new_state)
-        else
-          new_state
-        end
-
-      {:error, reason} ->
-        Logger.debug("Handler action read_stream failed on stream #{stream_id}: #{inspect(reason)}")
-        state
-    end
+    # Drain the stream completely, following the quiche example pattern
+    drain_stream_completely(state, stream_id, max_bytes)
   end
 
   defp execute_handler_action({:refuse_stream, stream_id, error_code}, state) do
@@ -1061,6 +1091,34 @@ defmodule Quichex.Connection do
     state
   end
 
+  # Drain a stream completely by reading in a loop until Done
+  # This follows the pattern from quiche/examples/server.rs:
+  #   while let Ok((read, fin)) = conn.stream_recv(s, &mut buf) { ... }
+  defp drain_stream_completely(state, stream_id, max_bytes) do
+    case Native.connection_stream_recv(state.conn_resource, stream_id, max_bytes) do
+      {:ok, {stream_data, fin}} ->
+        # Update stream state
+        {stream, new_state} = State.get_or_create_stream(state, stream_id, :bidirectional)
+        stream = StreamState.add_bytes_received(stream, byte_size(stream_data))
+        stream = if fin, do: StreamState.mark_fin_received(stream), else: stream
+        new_state = State.update_stream(new_state, stream)
+
+        # Call handler with the data (if callback is implemented)
+        new_state = if state.handler_module && function_exported?(state.handler_module, :handle_stream_data, 5) do
+          call_handler(:handle_stream_data, [self(), stream_id, stream_data, fin], new_state)
+        else
+          new_state
+        end
+
+        # Keep reading until Done (tail-recursive)
+        drain_stream_completely(new_state, stream_id, max_bytes)
+
+      {:error, _reason} ->
+        # Done - quiche has no more data buffered for this stream
+        state
+    end
+  end
+
   # Helper functions merged from StateMachine
 
   defp do_open_stream(%State{} = state, :bidirectional) do
@@ -1076,25 +1134,55 @@ defmodule Quichex.Connection do
   end
 
   defp do_stream_send(%State{} = state, stream_id, data, fin) when is_binary(data) do
-    case Native.connection_stream_send(state.conn_resource, stream_id, data, fin) do
-      {:ok, _bytes_written} ->
+    # Check if there's already a send in progress on this stream
+    case Map.get(state.partial_sends, stream_id) do
+      nil ->
+        # No partial send - try to send immediately
+        do_stream_send_loop(state, stream_id, data, 0, fin)
+
+      {pending_data, _pending_fin} ->
+        # Partial send in progress - enqueue this send request
+        # It will be processed when the stream becomes writable and current send completes
+        Logger.debug("Stream #{stream_id}: Enqueueing #{byte_size(data)} bytes (#{byte_size(pending_data)} bytes pending)")
+        queue = Map.get(state.send_queues, stream_id, :queue.new())
+        new_queue = :queue.in({data, fin}, queue)
+        new_state = %{state | send_queues: Map.put(state.send_queues, stream_id, new_queue)}
+        {:ok, new_state}
+    end
+  end
+
+  defp do_stream_send_loop(state, _stream_id, data, offset, _fin) when offset >= byte_size(data) do
+    # All data sent
+    {:ok, state}
+  end
+
+  defp do_stream_send_loop(state, stream_id, data, offset, fin) do
+    remaining = binary_part(data, offset, byte_size(data) - offset)
+    # Only send FIN with the last chunk
+    send_fin = fin and (offset + byte_size(remaining) == byte_size(data))
+
+    case Native.connection_stream_send(state.conn_resource, stream_id, remaining, send_fin) do
+      {:ok, bytes_written} when bytes_written > 0 ->
         # Update stream state
-        {stream, state} = State.get_or_create_stream(state, stream_id, :bidirectional)
+        {stream, new_state} = State.get_or_create_stream(state, stream_id, :bidirectional)
+        stream = StreamState.add_bytes_sent(stream, bytes_written)
+        stream = if send_fin and bytes_written == byte_size(remaining), do: StreamState.mark_fin_sent(stream), else: stream
+        new_state = State.update_stream(new_state, stream)
 
-        stream =
-          stream
-          |> StreamState.add_bytes_sent(byte_size(data))
-          |> (fn s -> if fin, do: StreamState.mark_fin_sent(s), else: s end).()
+        # Generate and send packets after each write
+        new_state = generate_and_send_packets(new_state)
 
-        new_state =
-          state
-          |> State.update_stream(stream)
-          |> generate_and_send_packets()
+        # Continue with remaining data (tail-recursive loop)
+        do_stream_send_loop(new_state, stream_id, data, offset + bytes_written, fin)
 
+      {:ok, 0} ->
+        # Flow control exhausted - store partial send for later
+        # When stream becomes writable, we'll continue sending
+        new_state = %{state | partial_sends: Map.put(state.partial_sends, stream_id, {remaining, fin})}
         {:ok, new_state}
 
       {:error, reason} ->
-        Logger.debug("Stream send failed on stream #{stream_id}: #{inspect(reason)}")
+        # Real error (not just flow control)
         {:error, reason}
     end
   end
@@ -1132,6 +1220,38 @@ defmodule Quichex.Connection do
     end
   end
 
+  # Check if peer has closed the connection or if we're draining
+  defp check_if_peer_closed(%State{closed: true} = state), do: state
+
+  defp check_if_peer_closed(%State{closed: false} = state) do
+    # Check if connection is closed
+    closed? = case Native.connection_is_closed(state.conn_resource) do
+      {:ok, true} -> true
+      _ -> false
+    end
+
+    # Check if connection is draining (received CONNECTION_CLOSE from peer)
+    draining? = case Native.connection_is_draining(state.conn_resource) do
+      {:ok, true} -> true
+      _ -> false
+    end
+
+    cond do
+      closed? ->
+        Logger.debug("Connection is closed")
+        State.mark_closed(state, :peer_closed)
+
+      draining? ->
+        Logger.debug("Entering draining state (received CONNECTION_CLOSE from peer)")
+        # Per RFC 9000: enter draining state, stop sending packets
+        # The draining period is 3× PTO, managed by quiche
+        State.mark_closed(state, :draining)
+
+      true ->
+        state
+    end
+  end
+
   defp process_readable_streams(%State{} = state) do
     case Native.connection_readable_streams(state.conn_resource) do
       {:ok, readable_streams} ->
@@ -1148,6 +1268,122 @@ defmodule Quichex.Connection do
         end)
 
       {:error, _reason} ->
+        state
+    end
+  end
+
+  # Process all readable streams repeatedly until fully drained
+  # This ensures large data transfers are completely read even if they
+  # exceed the stream_recv_buffer_size
+  defp process_all_readable_streams(state, max_iterations \\ 100) do
+    # First populate readable_streams list
+    state = process_readable_streams(state)
+    # Then drain them
+    process_all_readable_streams_loop(state, 0, max_iterations)
+  end
+
+  defp process_all_readable_streams_loop(state, iteration, max_iterations) when iteration >= max_iterations do
+    Logger.warning("Max iterations (#{max_iterations}) reached while processing readable streams")
+    state
+  end
+
+  defp process_all_readable_streams_loop(state, iteration, max_iterations) do
+    # Call handler for each currently readable stream
+    updated_state =
+      Enum.reduce(state.readable_streams, state, fn stream_id, acc ->
+        call_handler(:handle_stream_readable, [self(), stream_id], acc)
+      end)
+
+    # Check if there are still readable streams after processing
+    case Native.connection_readable_streams(updated_state.conn_resource) do
+      {:ok, readable_streams} when readable_streams != [] ->
+        # Update state with new readable_streams and continue processing
+        updated_state = %{updated_state | readable_streams: readable_streams}
+        process_all_readable_streams_loop(updated_state, iteration + 1, max_iterations)
+
+      _ ->
+        # No more readable streams - done
+        %{updated_state | readable_streams: []}
+    end
+  end
+
+  # Process writable streams to continue partial sends
+  # This implements the pattern from quiche/examples/server.rs:498-529
+  defp process_writable_streams(state) do
+    case Native.connection_writable_streams(state.conn_resource) do
+      {:ok, writable_streams} ->
+        # For each writable stream, check if we have a partial send to complete
+        Enum.reduce(writable_streams, state, fn stream_id, acc ->
+          case Map.get(acc.partial_sends, stream_id) do
+            {remaining_data, fin} ->
+              # Continue sending the remaining data
+              case do_stream_send_loop(acc, stream_id, remaining_data, 0, fin) do
+                {:ok, new_state} ->
+                  # Check if partial send was cleared (fully sent)
+                  if Map.has_key?(new_state.partial_sends, stream_id) do
+                    # Still partial - don't process queue yet
+                    new_state
+                  else
+                    # Fully sent - process queue
+                    process_send_queue(new_state, stream_id)
+                  end
+
+                {:error, _reason} ->
+                  # Keep partial send on error
+                  acc
+              end
+
+            nil ->
+              # No partial send - check if there are queued sends to start
+              process_send_queue(acc, stream_id)
+          end
+        end)
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  # Process queued sends for a stream
+  defp process_send_queue(state, stream_id) do
+    # Only process queue if no partial send is in progress
+    case Map.get(state.partial_sends, stream_id) do
+      nil ->
+        # No partial send - check if there's a queued send
+        queue = Map.get(state.send_queues, stream_id, :queue.new())
+
+        case :queue.out(queue) do
+          {{:value, {data, fin}}, new_queue} ->
+            # Dequeue and try to send
+            queue_remaining = :queue.len(new_queue)
+            Logger.debug("Stream #{stream_id}: Dequeuing #{byte_size(data)} bytes (#{queue_remaining} items remain), fin=#{fin}")
+            new_state = %{state | send_queues: Map.put(state.send_queues, stream_id, new_queue)}
+
+            case do_stream_send_loop(new_state, stream_id, data, 0, fin) do
+              {:ok, final_state} ->
+                # Send completed (or became partial) - recursively check queue again
+                if Map.has_key?(final_state.partial_sends, stream_id) do
+                  Logger.debug("Stream #{stream_id}: Send became partial (#{queue_remaining} items still queued)")
+                end
+                process_send_queue(final_state, stream_id)
+
+              {:error, reason} ->
+                Logger.warning("Stream #{stream_id}: Send error: #{inspect(reason)}")
+                # Error - stop processing queue
+                new_state
+            end
+
+          {:empty, _queue} ->
+            # No queued sends - clean up empty queue
+            %{state | send_queues: Map.delete(state.send_queues, stream_id)}
+        end
+
+      {pending_data, _pending_fin} ->
+        # Partial send still in progress - don't process queue yet
+        queue_size = Map.get(state.send_queues, stream_id, :queue.new()) |> :queue.len()
+        if queue_size > 0 do
+          Logger.debug("Stream #{stream_id}: Skipping queue (#{queue_size} items) - partial send of #{byte_size(pending_data)} bytes in progress")
+        end
         state
     end
   end
@@ -1185,13 +1421,18 @@ defmodule Quichex.Connection do
   end
 
   defp schedule_next_timeout(state) do
+    # Cancel previous timeout if it exists
+    if state.timeout_ref do
+      Process.cancel_timer(state.timeout_ref)
+    end
+
     case Native.connection_timeout(state.conn_resource) do
       {:ok, timeout_ms} when is_integer(timeout_ms) ->
-        Process.send_after(self(), :quic_timeout, timeout_ms)
-        state
+        ref = Process.send_after(self(), :quic_timeout, timeout_ms)
+        %{state | timeout_ref: ref}
 
       _ ->
-        state
+        %{state | timeout_ref: nil}
     end
   end
 

@@ -106,7 +106,7 @@ defmodule Quichex.Test.ListenerHelpers do
     handler = Keyword.get(opts, :handler, Quichex.Handler.Default)
     handler_opts = Keyword.get(opts, :handler_opts, [])
 
-    Connection.start_link(
+    Quichex.start_connection(
       host: host,
       port: port,
       config: config,
@@ -144,15 +144,32 @@ defmodule Quichex.Test.ListenerHelpers do
   @doc """
   Waits for stream data to be received.
 
-  Expects a message of the form `{:quic_stream_data, ^conn_pid, ^stream_id, data, fin}`
+  Accumulates data from multiple packets until FIN is received.
+  Returns `{:ok, data, fin}` when complete or `{:error, :timeout}`.
   """
   def wait_for_stream_data(conn_pid, stream_id, timeout \\ 5_000) do
-    receive do
-      {:quic_stream_data, ^conn_pid, ^stream_id, data, fin} ->
-        {:ok, data, fin}
-    after
-      timeout ->
-        {:error, :timeout}
+    deadline = System.monotonic_time(:millisecond) + timeout
+    wait_for_stream_data_loop(conn_pid, stream_id, deadline, <<>>)
+  end
+
+  defp wait_for_stream_data_loop(conn_pid, stream_id, deadline, acc) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      {:error, :timeout}
+    else
+      receive do
+        {:quic_stream_data, ^conn_pid, ^stream_id, data, true} ->
+          # FIN received - return accumulated data
+          {:ok, <<acc::binary, data::binary>>, true}
+
+        {:quic_stream_data, ^conn_pid, ^stream_id, data, false} ->
+          # More data expected - accumulate and continue
+          wait_for_stream_data_loop(conn_pid, stream_id, deadline, <<acc::binary, data::binary>>)
+      after
+        remaining ->
+          {:error, :timeout}
+      end
     end
   end
 
@@ -176,7 +193,7 @@ defmodule Quichex.Test.ListenerHelpers do
   """
   def stop_client(conn_pid) do
     if Process.alive?(conn_pid) do
-      Connection.close(conn_pid)
+      Quichex.close_connection(conn_pid)
       # Wait a bit for graceful shutdown
       Process.sleep(50)
 

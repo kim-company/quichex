@@ -1,5 +1,8 @@
 defmodule Quichex.ListenerIntegrationTest do
-  use ExUnit.Case, async: true
+  # Cannot run async because all tests share the global ConnectionRegistry
+  # and this test creates many concurrent connections which can interfere
+  # with other tests running in parallel
+  use ExUnit.Case, async: false
 
   alias Quichex.{Connection, Listener}
   alias Quichex.Test.{EchoHandler, ListenerHelpers}
@@ -81,8 +84,8 @@ defmodule Quichex.ListenerIntegrationTest do
       # Close first client
       ListenerHelpers.stop_client(client1)
 
-      # Give time for connection cleanup
-      Process.sleep(100)
+      # Give time for connection cleanup (closed state has 50ms timeout)
+      Process.sleep(150)
 
       # Should have 1 connection
       assert 1 = Listener.connection_count(listener)
@@ -103,7 +106,7 @@ defmodule Quichex.ListenerIntegrationTest do
       assert {:ok, {_ip, port}} = Listener.local_address(listener)
 
       # Connect client
-      assert {:ok, client} = ListenerHelpers.start_client(port, handler_opts: [pid: self()])
+      assert {:ok, client} = ListenerHelpers.start_client(port, handler_opts: [controlling_process: self()])
       assert :ok = ListenerHelpers.wait_for_connection(client, 1_000)
 
       # Open multiple streams and send data
@@ -198,15 +201,18 @@ defmodule Quichex.ListenerIntegrationTest do
       # Verify connections
       assert 3 = Listener.connection_count(listener)
 
-      # Stop listener
-      stop_supervised(Listener)
+      # Stop listener - use GenServer.stop to ensure terminate is called
+      GenServer.stop(listener, :normal)
 
-      # Give time for cleanup
-      Process.sleep(100)
+      # Give time for cleanup (connections close and transition to :closed state)
+      # Server connections send CONNECTION_CLOSE frames, clients receive and process them
+      # Clients should close and terminate within 50ms after receiving the frame
+      Process.sleep(200)
 
-      # Connections should be closed (processes should be dead)
+      # Verify all client connections have terminated
       for client <- clients do
-        refute Process.alive?(client)
+        refute Process.alive?(client),
+               "Client #{inspect(client)} should have terminated after receiving CONNECTION_CLOSE"
       end
     end
 
@@ -233,8 +239,8 @@ defmodule Quichex.ListenerIntegrationTest do
       # Close from client
       assert :ok = Connection.close(client)
 
-      # Wait for cleanup
-      Process.sleep(100)
+      # Wait for cleanup (closed state has 50ms timeout)
+      Process.sleep(150)
 
       # Connection should be removed
       assert 0 = Listener.connection_count(listener)

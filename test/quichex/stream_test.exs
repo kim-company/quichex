@@ -1,5 +1,5 @@
 defmodule Quichex.StreamTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   alias Quichex.{Config, Connection}
 
