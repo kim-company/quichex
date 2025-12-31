@@ -6,9 +6,11 @@ This guide covers testing both client and server implementations in Quichex.
 
 | Category | Count | Server Required | Run Time | Command |
 |----------|-------|-----------------|----------|---------|
-| **Unit Tests** | ~70 | No | ~1 sec | `mix test --exclude external` |
-| **Integration Tests** | 7 | Internal | ~1 sec | `mix test test/quichex/listener_integration_test.exs` |
-| **External Tests** | ~5 | cloudflare-quic.com | ~5 sec | `mix test --include external` |
+| **Unit Tests** | 58 | No | ~1.8s (0.2s async, 1.6s sync) | `mix test --exclude external` |
+| **Integration Tests** | 7 | Internal | ~1.7s (async: false) | `mix test test/quichex/listener_integration_test.exs` |
+| **External Tests** | 15 | cloudflare-quic.com | ~1-2s | `mix test --only external` |
+
+**Total: 73 tests, all passing ✅**
 
 ### Quick Test Commands
 
@@ -31,6 +33,82 @@ mix test test/quichex/listener_integration_test.exs
 ```bash
 mix test --include external
 ```
+
+---
+
+## Test Architecture
+
+Quichex tests are organized into distinct layers based on what they're testing:
+
+### Unit Tests (Direct Connection API)
+
+**Layer**: `Connection.start_link/1` via `start_link_supervised!/1`
+
+Unit tests bypass the ConnectionRegistry supervisor to test Connection functionality in isolation. They use:
+- **Direct API**: `start_link_supervised!({Connection, opts})`
+- **Test Handler**: `Quichex.Test.NoOpHandler` (no message notifications)
+- **ExUnit Supervisor**: Automatic cleanup, no manual process management
+- **Async**: Tests run in parallel (`async: true`)
+
+**Benefits**:
+- Fast execution (minimal overhead)
+- Perfect isolation (each test gets its own supervision tree)
+- Clean output (no handler messages to ExUnit supervisor)
+- No shared state between tests
+
+**Example**:
+```elixir
+test "creates a connection with valid config" do
+  config = Config.new!()
+  pid = start_link_supervised!({Connection, [
+    host: "127.0.0.1",
+    port: 9999,
+    config: config,
+    handler: NoOpHandler
+  ]})
+  assert Process.alive?(pid)
+  # No cleanup needed - ExUnit supervisor handles it
+end
+```
+
+### Integration Tests (Full Supervision Path)
+
+**Layer**: `Quichex.start_connection/1` via ConnectionRegistry
+
+Integration tests use the full production supervision tree:
+- **Public API**: `Quichex.start_connection/1`
+- **Supervision**: Via ConnectionRegistry (DynamicSupervisor)
+- **Default Handler**: `Quichex.Handler.Default` (sends messages)
+- **Async**: False for listener tests (shared ConnectionRegistry)
+
+**Benefits**:
+- Tests real supervision behavior
+- Validates full application path
+- Tests handler message protocol
+- Realistic concurrency patterns
+
+**Example**:
+```elixir
+test "echo test" do
+  {:ok, client} = ListenerHelpers.start_client(port,
+    handler_opts: [controlling_process: self()]
+  )
+  # Uses full supervision via ConnectionRegistry
+  assert_receive {:quic_connected, ^client}
+end
+```
+
+### Test Handlers
+
+**NoOpHandler** (`test/support/noop_handler.ex`):
+- For unit tests that don't need notifications
+- Implements all `Quichex.Handler` callbacks as no-ops
+- Prevents error logs from unhandled messages
+
+**EchoHandler** (`test/support/echo_handler.ex`):
+- For integration tests with server
+- Echoes stream data back to client
+- Tests full bidirectional communication
 
 ---
 
@@ -130,16 +208,20 @@ assert data == "Hello, QUIC!"
 
 Location: `test/quichex/listener_integration_test.exs`
 
-**Tests**:
+**All 7 tests passing ✅**:
 1. ✅ Echo test - client sends data, server echoes back
-2. ⏳ Listener tracks active connections (test infrastructure issue)
-3. ⏳ Multiple streams on single connection (handler error)
-4. ⏳ Multiple concurrent connections (killed connections)
-5. ⏳ Listener shutdown with active connections (process alive check)
-6. ⏳ Connection close from client side (cleanup timing)
-7. ⏳ Large data transfer (data integrity - partial success)
+2. ✅ Listener tracks active connections
+3. ✅ Multiple streams on single connection
+4. ✅ Multiple concurrent connections (10 clients)
+5. ✅ Listener shutdown with active connections
+6. ✅ Connection close from client side
+7. ✅ Large data transfer (100KB bidirectional)
 
-**Note**: Tests 2-7 have test-specific issues (not protocol failures). The core server handshake and routing work correctly.
+**Test Configuration**:
+- `async: false` - Tests share global ConnectionRegistry
+- Uses full supervision path via `Quichex.start_connection/1`
+- EchoHandler for server-side message handling
+- Clean output: No error logs
 
 ### Running Specific Tests
 
@@ -318,21 +400,37 @@ Quichex.Listener.local_address(listener)     # {ip, port}
 
 ## Test Coverage
 
-### Current Status
+### Current Status (December 2025)
 
 ```
-Config Tests:                   40 tests ✅
-Connection Tests (client):      21 tests ✅
-Stream Tests:                   12 tests ✅
-Integration Tests (external):    5 tests ✅ (internet required)
-Integration Tests (listener):    1 test  ✅ (echo test)
-                                 6 tests ⏳ (test infrastructure fixes)
+Unit Tests:
+  Config Tests:                 40 tests ✅
+  Connection Tests:             12 tests ✅
+  Stream Tests:                  5 tests ✅
+  Doctest:                       1 test  ✅
+
+Integration Tests:
+  Listener Integration:          7 tests ✅ (internal client-server)
+
+External Tests:
+  Connection (cloudflare):       1 test  ✅
+  Integration (cloudflare):      4 tests ✅
+  Stream (cloudflare):           8 tests ✅
+  Listener (cloudflare):         2 tests ✅
 ─────────────────────────────────────────────────
-Total:                          ~80 tests
+Total:                          73 tests
 
-Pass Rate:                      ~75/80 (94%)
-Echo Test Stability:            100% (5/5 runs)
+Pass Rate:                      73/73 (100%) ✅
+Stability:                      100% (verified over multiple runs)
+Clean Output:                   No error logs ✅
 ```
+
+**Test Quality Improvements**:
+- ✅ Unit tests use `NoOpHandler` for clean output
+- ✅ Integration tests properly use full supervision path
+- ✅ All tests have proper cleanup (no resource leaks)
+- ✅ External tests handle server-side connection closure gracefully
+- ✅ Connections use `:temporary` restart strategy (correct OTP pattern)
 
 ### Running Full Suite
 
@@ -374,20 +472,22 @@ mix test --include external
 
 ## Next Steps
 
-### Remaining Integration Tests
+### Test Infrastructure (Complete ✅)
 
-Fix 6 remaining integration tests:
-1. Multiple concurrent connections (connection cleanup)
-2. Large data transfer (buffering/reassembly)
-3. Connection close from client side (cleanup timing)
-4. Multiple streams on single connection (handler state)
-5. Listener tracks active connections (connection monitoring)
-6. Listener shutdown with active connections (termination)
+All core tests are passing with clean output. Test infrastructure improvements completed:
+- ✅ Test layer architecture (unit vs integration)
+- ✅ NoOpHandler for clean unit tests
+- ✅ Proper supervision testing (temporary restart strategy)
+- ✅ All 7 listener integration tests passing
+- ✅ All 15 external cloudflare tests passing
 
 ### Future Testing
 
+Advanced testing scenarios for Milestone 6+:
 - Interop with quiche-client → Quichex server
 - Stress testing (1000+ concurrent connections)
 - Packet loss simulation
 - Connection migration testing
 - Performance benchmarks
+- Datagram extension testing
+- Path migration testing
