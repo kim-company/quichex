@@ -62,7 +62,41 @@ defmodule Quichex do
   """
   @spec start_connection(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_connection(opts) do
-    Quichex.ConnectionRegistry.start_connection(opts)
+    # Extract metadata for telemetry
+    host = Keyword.get(opts, :host, "unknown")
+    port = Keyword.get(opts, :port, 0)
+    mode = if Keyword.has_key?(opts, :listener_pid), do: :server, else: :client
+
+    metadata = %{
+      host: to_string(host),
+      port: port,
+      mode: mode
+    }
+
+    start_time = Quichex.Telemetry.start([:connection, :connect], metadata)
+
+    case Quichex.ConnectionRegistry.start_connection(opts) do
+      {:ok, conn_pid} = result ->
+        Quichex.Telemetry.stop(
+          [:connection, :connect],
+          start_time,
+          Map.put(metadata, :conn_pid, conn_pid)
+        )
+
+        result
+
+      {:error, reason} = error ->
+        Quichex.Telemetry.exception(
+          [:connection, :connect],
+          start_time,
+          :error,
+          reason,
+          [],
+          metadata
+        )
+
+        error
+    end
   end
 
   @doc """

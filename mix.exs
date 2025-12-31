@@ -28,6 +28,7 @@ defmodule Quichex.MixProject do
   defp deps do
     [
       {:rustler, "~> 0.37.1"},
+      {:telemetry, "~> 1.3"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end

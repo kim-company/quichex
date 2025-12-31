@@ -99,7 +99,8 @@ defmodule Quichex.Listener do
     :handler,
     :handler_opts,
     connections: %{},
-    monitors: %{}
+    monitors: %{},
+    operation_timers: %{}
   ]
 
   ## Public API
@@ -189,6 +190,14 @@ defmodule Quichex.Listener do
   defp do_init(port, config, handler, opts) do
     handler_opts = Keyword.get(opts, :handler_opts, [])
 
+    # Emit listener start event
+    metadata = %{
+      port: port,
+      handler: handler
+    }
+
+    start_time = Quichex.Telemetry.start([:listener, :start], metadata)
+
     # Open UDP socket in active mode
     socket_opts = [:binary, {:active, true}, {:reuseaddr, true}]
 
@@ -196,6 +205,16 @@ defmodule Quichex.Listener do
       {:ok, socket} ->
         {:ok, actual_port} = :inet.port(socket)
         Logger.info("QUIC Listener started on port #{actual_port}")
+
+        # Emit listener start stop event
+        Quichex.Telemetry.stop(
+          [:listener, :start],
+          start_time,
+          Map.merge(metadata, %{
+            port: actual_port,
+            listener_pid: self()
+          })
+        )
 
         state = %__MODULE__{
           socket: socket,
@@ -209,6 +228,17 @@ defmodule Quichex.Listener do
 
       {:error, reason} ->
         Logger.error("Failed to open UDP socket: #{inspect(reason)}")
+
+        # Emit listener start exception event
+        Quichex.Telemetry.exception(
+          [:listener, :start],
+          start_time,
+          :error,
+          reason,
+          [],
+          metadata
+        )
+
         {:stop, {:socket_error, reason}}
     end
   end
@@ -227,7 +257,7 @@ defmodule Quichex.Listener do
   end
 
   @impl true
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+  def handle_info({:DOWN, ref, :process, pid, reason}, state) do
     # Connection process died - remove from routing table
     case Map.get(state.monitors, ref) do
       nil ->
@@ -235,6 +265,19 @@ defmodule Quichex.Listener do
 
       dcid ->
         Logger.debug("Connection terminated, DCID: #{Base.encode16(dcid)}")
+
+        # Emit connection terminated event (stop-only, no start)
+        Quichex.Telemetry.event(
+          [:listener, :connection_terminated, :stop],
+          %{monotonic_time: System.monotonic_time()},
+          %{
+            listener_pid: self(),
+            conn_pid: pid,
+            dcid: dcid,
+            reason: reason,
+            active_connections: map_size(state.connections) - 1
+          }
+        )
 
         new_state = %{
           state
@@ -279,22 +322,75 @@ defmodule Quichex.Listener do
 
   # Routes a packet to the appropriate connection or accepts a new connection
   defp route_packet(packet, peer_addr, state) do
+    packet_size = byte_size(packet)
+
+    metadata = %{
+      listener_pid: self(),
+      peer_addr: peer_addr,
+      packet_size: packet_size
+    }
+
+    start_time = Quichex.Telemetry.start([:listener, :route_packet], metadata, %{packet_size: packet_size})
+
     # Parse header to extract DCID for routing
     case Native.header_info(packet, 16) do
       {:ok, %{dcid: dcid}} ->
         case Map.get(state.connections, dcid) do
           nil ->
             # New connection - accept it
-            accept_connection(packet, peer_addr, dcid, state)
+            result = accept_connection(packet, peer_addr, dcid, state)
+
+            case result do
+              {:ok, _new_state} ->
+                Quichex.Telemetry.stop(
+                  [:listener, :route_packet],
+                  start_time,
+                  Map.merge(metadata, %{action: :accepted}),
+                  %{packet_size: packet_size}
+                )
+
+                result
+
+              {:error, reason} ->
+                Quichex.Telemetry.exception(
+                  [:listener, :route_packet],
+                  start_time,
+                  :error,
+                  reason,
+                  [],
+                  Map.merge(metadata, %{action: :accept_failed})
+                )
+
+                result
+            end
 
           conn_pid ->
             # Existing connection - forward packet
-            forward_packet(conn_pid, packet, peer_addr, state)
+            result = forward_packet(conn_pid, packet, peer_addr, state)
+
+            Quichex.Telemetry.stop(
+              [:listener, :route_packet],
+              start_time,
+              Map.merge(metadata, %{action: :forwarded, conn_pid: conn_pid}),
+              %{packet_size: packet_size}
+            )
+
+            result
         end
 
       {:error, reason} ->
         # Invalid packet - ignore
         Logger.debug("Invalid packet from #{inspect(peer_addr)}: #{reason}")
+
+        Quichex.Telemetry.exception(
+          [:listener, :route_packet],
+          start_time,
+          :error,
+          reason,
+          [],
+          metadata
+        )
+
         {:ok, state}
     end
   end
@@ -329,6 +425,15 @@ defmodule Quichex.Listener do
 
     Logger.info("Accepting new connection from #{format_addr(peer_addr)}, DCID: #{:binary.list_to_bin(dcid) |> Base.encode16()}")
 
+    # Emit accept start event
+    metadata = %{
+      listener_pid: self(),
+      peer_addr: peer_addr,
+      dcid: :binary.list_to_bin(dcid)
+    }
+
+    start_time = Quichex.Telemetry.start([:listener, :accept], metadata)
+
     # Start new server connection
     server_opts = [
       mode: :server,
@@ -360,10 +465,32 @@ defmodule Quichex.Listener do
         send(conn_pid, {:udp, state.socket, peer_ip, peer_port, packet})
 
         Logger.debug("Connection accepted, PID: #{inspect(conn_pid)}")
+
+        # Emit accept stop event
+        Quichex.Telemetry.stop(
+          [:listener, :accept],
+          start_time,
+          Map.merge(metadata, %{
+            conn_pid: conn_pid,
+            local_addr: local_addr
+          })
+        )
+
         {:ok, new_state}
 
       {:error, reason} ->
         Logger.error("Failed to accept connection: #{inspect(reason)}")
+
+        # Emit accept exception event
+        Quichex.Telemetry.exception(
+          [:listener, :accept],
+          start_time,
+          :error,
+          reason,
+          [],
+          metadata
+        )
+
         {:error, reason}
     end
   end

@@ -67,7 +67,11 @@ defmodule Quichex.State do
           packets_sent: non_neg_integer(),
           packets_received: non_neg_integer(),
           bytes_sent: non_neg_integer(),
-          bytes_received: non_neg_integer()
+          bytes_received: non_neg_integer(),
+
+          # Telemetry timing
+          handshake_start_time: integer() | nil,
+          operation_timers: %{optional(term()) => integer()}
         }
 
   defstruct conn_resource: nil,
@@ -99,7 +103,9 @@ defmodule Quichex.State do
             packets_sent: 0,
             packets_received: 0,
             bytes_sent: 0,
-            bytes_received: 0
+            bytes_received: 0,
+            handshake_start_time: nil,
+            operation_timers: %{}
 
   @doc """
   Creates a new connection state.

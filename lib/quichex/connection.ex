@@ -191,7 +191,37 @@ defmodule Quichex.Connection do
   @spec open_stream(pid(), :bidirectional | :unidirectional | keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def open_stream(pid, opts) when is_list(opts) do
-    :gen_statem.call(pid, {:open_stream, opts})
+    type = Keyword.get(opts, :type, :bidirectional)
+
+    metadata = %{
+      conn_pid: pid,
+      type: type
+    }
+
+    start_time = Quichex.Telemetry.start([:stream, :open], metadata)
+
+    case :gen_statem.call(pid, {:open_stream, opts}) do
+      {:ok, stream_id} = result ->
+        Quichex.Telemetry.stop(
+          [:stream, :open],
+          start_time,
+          Map.put(metadata, :stream_id, stream_id)
+        )
+
+        result
+
+      {:error, reason} = error ->
+        Quichex.Telemetry.exception(
+          [:stream, :open],
+          start_time,
+          :error,
+          reason,
+          [],
+          metadata
+        )
+
+        error
+    end
   end
 
   def open_stream(pid, type) when type in [:bidirectional, :unidirectional] do
@@ -240,7 +270,41 @@ defmodule Quichex.Connection do
   @spec stream_send(pid(), non_neg_integer(), binary(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def stream_send(pid, stream_id, data, opts \\ []) when is_binary(data) do
-    :gen_statem.call(pid, {:stream_send, stream_id, data, opts})
+    fin = Keyword.get(opts, :fin, false)
+    data_size = byte_size(data)
+
+    metadata = %{
+      conn_pid: pid,
+      stream_id: stream_id,
+      fin: fin,
+      data_size: data_size
+    }
+
+    start_time = Quichex.Telemetry.start([:stream, :send], metadata, %{data_size: data_size})
+
+    case :gen_statem.call(pid, {:stream_send, stream_id, data, opts}) do
+      {:ok, bytes_written} = result ->
+        Quichex.Telemetry.stop(
+          [:stream, :send],
+          start_time,
+          Map.put(metadata, :partial, bytes_written < data_size),
+          %{bytes_written: bytes_written, data_size: data_size}
+        )
+
+        result
+
+      {:error, reason} = error ->
+        Quichex.Telemetry.exception(
+          [:stream, :send],
+          start_time,
+          :error,
+          reason,
+          [],
+          metadata
+        )
+
+        error
+    end
   end
 
   @doc """
@@ -273,7 +337,39 @@ defmodule Quichex.Connection do
   @spec stream_recv(pid(), non_neg_integer(), keyword()) ::
           {:ok, {binary(), boolean()}} | {:error, term()}
   def stream_recv(pid, stream_id, opts \\ []) do
-    :gen_statem.call(pid, {:stream_recv, stream_id, opts})
+    max_bytes = Keyword.get(opts, :max_bytes, 65535)
+
+    metadata = %{
+      conn_pid: pid,
+      stream_id: stream_id,
+      max_bytes: max_bytes
+    }
+
+    start_time = Quichex.Telemetry.start([:stream, :recv], metadata)
+
+    case :gen_statem.call(pid, {:stream_recv, stream_id, opts}) do
+      {:ok, {data, fin}} = result ->
+        Quichex.Telemetry.stop(
+          [:stream, :recv],
+          start_time,
+          Map.put(metadata, :fin, fin),
+          %{bytes_read: byte_size(data)}
+        )
+
+        result
+
+      {:error, reason} = error ->
+        Quichex.Telemetry.exception(
+          [:stream, :recv],
+          start_time,
+          :error,
+          reason,
+          [],
+          metadata
+        )
+
+        error
+    end
   end
 
   @doc """
@@ -301,13 +397,38 @@ defmodule Quichex.Connection do
 
   def stream_shutdown(pid, stream_id, direction, error_code)
       when direction in [:read, :write, :both] and is_integer(error_code) do
-    :gen_statem.call(pid, {:stream_shutdown, stream_id, direction, error_code})
+    metadata = %{
+      conn_pid: pid,
+      stream_id: stream_id,
+      direction: direction,
+      error_code: error_code
+    }
+
+    start_time = Quichex.Telemetry.start([:stream, :shutdown], metadata)
+
+    case :gen_statem.call(pid, {:stream_shutdown, stream_id, direction, error_code}) do
+      :ok = result ->
+        Quichex.Telemetry.stop([:stream, :shutdown], start_time, metadata)
+        result
+
+      {:error, reason} = error ->
+        Quichex.Telemetry.exception(
+          [:stream, :shutdown],
+          start_time,
+          :error,
+          reason,
+          [],
+          metadata
+        )
+
+        error
+    end
   end
 
   def stream_shutdown(pid, stream_id, direction, opts)
       when direction in [:read, :write, :both] and is_list(opts) do
     error_code = Keyword.get(opts, :error_code, 0)
-    :gen_statem.call(pid, {:stream_shutdown, stream_id, direction, error_code})
+    stream_shutdown(pid, stream_id, direction, error_code)
   end
 
   ## gen_statem Callbacks
@@ -377,9 +498,20 @@ defmodule Quichex.Connection do
   end
 
   def init(:state_timeout, :start_handshake, %State{connection_mode: :client} = data) do
+    # Emit handshake start event
+    metadata = %{
+      conn_pid: self(),
+      mode: :client,
+      peer_addr: data.peer_addr,
+      local_addr: data.local_addr
+    }
+
+    start_time = Quichex.Telemetry.start([:connection, :handshake], metadata)
+
     # Client: Generate and send initial packets, schedule timeout
     updated_data =
       data
+      |> Map.put(:handshake_start_time, start_time)
       |> generate_and_send_packets()
       |> schedule_next_timeout()
 
@@ -391,11 +523,22 @@ defmodule Quichex.Connection do
   def init(:info, {:udp, socket, _ip, _port, packet}, %State{socket: socket, connection_mode: :server} = data) do
     recv_info = %{from: data.peer_addr, to: data.local_addr}
 
+    # Emit handshake start event
+    metadata = %{
+      conn_pid: self(),
+      mode: :server,
+      peer_addr: data.peer_addr,
+      local_addr: data.local_addr
+    }
+
+    start_time = Quichex.Telemetry.start([:connection, :handshake], metadata)
+
     case Native.connection_recv(data.conn_resource, packet, recv_info) do
       {:ok, _bytes_read} ->
         # Process first packet and send response
         updated_data =
           data
+          |> Map.put(:handshake_start_time, start_time)
           |> State.increment_packets_received()
           |> generate_and_send_packets()
           |> schedule_next_timeout()
@@ -415,8 +558,28 @@ defmodule Quichex.Connection do
     {:keep_state_and_data, [{:state_timeout, 10_000, :handshake_timeout}]}
   end
 
-  def handshaking(:state_timeout, :handshake_timeout, _data) do
+  def handshaking(:state_timeout, :handshake_timeout, data) do
     Logger.error("Handshake timeout")
+
+    # Emit handshake exception event
+    if data.handshake_start_time do
+      metadata = %{
+        conn_pid: self(),
+        mode: data.connection_mode,
+        peer_addr: data.peer_addr,
+        local_addr: data.local_addr
+      }
+
+      Quichex.Telemetry.exception(
+        [:connection, :handshake],
+        data.handshake_start_time,
+        :error,
+        :timeout,
+        [],
+        metadata
+      )
+    end
+
     {:stop, :handshake_timeout}
   end
 
@@ -511,11 +674,21 @@ defmodule Quichex.Connection do
     reason_str = Keyword.get(opts, :reason, "")
     reason_bytes = if is_binary(reason_str), do: reason_str, else: to_string(reason_str)
 
+    # Emit close start event
+    metadata = %{
+      conn_pid: self(),
+      error_code: error_code,
+      reason: reason_str
+    }
+
+    start_time = Quichex.Telemetry.start([:connection, :close], metadata)
+
     case Native.connection_close(data.conn_resource, true, error_code, reason_bytes) do
       {:ok, _} ->
         # Generate and send close packets before transitioning
         new_data =
           data
+          |> Map.put(:operation_timers, Map.put(data.operation_timers, :close, start_time))
           |> State.mark_closed(:normal)
           |> generate_and_send_packets()
 
@@ -523,7 +696,11 @@ defmodule Quichex.Connection do
 
       # "done" error means connection isn't ready, but we're closing anyway
       {:error, "Close error: done"} ->
-        new_data = State.mark_closed(data, :normal)
+        new_data =
+          data
+          |> Map.put(:operation_timers, Map.put(data.operation_timers, :close, start_time))
+          |> State.mark_closed(:normal)
+
         {:next_state, :closed, new_data, [{:reply, from, :ok}]}
 
       {:error, reason} ->
@@ -725,11 +902,21 @@ defmodule Quichex.Connection do
     # Ensure reason is a binary
     reason_bytes = if is_binary(reason_str), do: reason_str, else: to_string(reason_str)
 
+    # Emit close start event
+    metadata = %{
+      conn_pid: self(),
+      error_code: error_code,
+      reason: reason_str
+    }
+
+    start_time = Quichex.Telemetry.start([:connection, :close], metadata)
+
     case Native.connection_close(data.conn_resource, true, error_code, reason_bytes) do
       {:ok, _} ->
         # Generate and send close packets before transitioning
         new_data =
           data
+          |> Map.put(:operation_timers, Map.put(data.operation_timers, :close, start_time))
           |> State.mark_closed(:normal)
           |> generate_and_send_packets()
 
@@ -737,7 +924,11 @@ defmodule Quichex.Connection do
 
       # "done" error means connection isn't ready, but we're closing anyway
       {:error, "Close error: done"} ->
-        new_data = State.mark_closed(data, :normal)
+        new_data =
+          data
+          |> Map.put(:operation_timers, Map.put(data.operation_timers, :close, start_time))
+          |> State.mark_closed(:normal)
+
         {:next_state, :closed, new_data, [{:reply, from, :ok}]}
 
       {:error, reason} ->
@@ -764,6 +955,29 @@ defmodule Quichex.Connection do
 
   # State: :closed
   def closed(:enter, _old_state, data) do
+    # Emit close stop event with final statistics
+    if close_start_time = Map.get(data.operation_timers, :close) do
+      metadata = %{
+        conn_pid: self(),
+        close_reason: data.close_reason || :normal,
+        active_streams: map_size(data.streams)
+      }
+
+      measurements = %{
+        packets_sent: data.packets_sent,
+        packets_received: data.packets_received,
+        bytes_sent: data.bytes_sent,
+        bytes_received: data.bytes_received
+      }
+
+      Quichex.Telemetry.stop(
+        [:connection, :close],
+        close_start_time,
+        metadata,
+        measurements
+      )
+    end
+
     # Clean up socket (only if we own it - client mode)
     cleanup_socket(data)
 
@@ -1212,7 +1426,25 @@ defmodule Quichex.Connection do
     case Native.connection_is_established(state.conn_resource) do
       {:ok, true} ->
         Logger.debug("Connection established")
+
+        # Emit handshake stop event
+        if state.handshake_start_time do
+          metadata = %{
+            conn_pid: self(),
+            mode: state.connection_mode,
+            peer_addr: state.peer_addr,
+            local_addr: state.local_addr
+          }
+
+          Quichex.Telemetry.stop(
+            [:connection, :handshake],
+            state.handshake_start_time,
+            metadata
+          )
+        end
+
         state = State.mark_established(state)
+        state = %{state | handshake_start_time: nil}
         reply_to_waiters(state, :ok)
 
       _ ->
