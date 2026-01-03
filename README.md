@@ -18,6 +18,17 @@ helpers while keeping the return values idiomatic (`{:ok, term}` /
 - Capture and reuse TLS session blobs for fast resumption, and toggle keylog
   paths for debugging.
 
+## Example Workflow
+
+```elixir
+alias Quichex.Native.TestHelpers
+
+{_, client} = TestHelpers.create_connection()
+{_, server} = TestHelpers.accept_connection()
+
+:ok = TestHelpers.ok!(Quichex.Native.connection_stream_send(client, 0, "hi", true))
+```
+
 ## Testing
 
 All tests can be run with:

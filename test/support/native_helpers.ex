@@ -1,5 +1,14 @@
 defmodule Quichex.Native.TestHelpers do
-  @moduledoc false
+  @moduledoc """
+  Convenience helpers for spinning up quiche client/server resources in tests.
+
+  ```elixir
+  alias Quichex.Native.TestHelpers
+
+  {_, client} = TestHelpers.create_connection()
+  {_, server} = TestHelpers.accept_connection()
+  ```
+  """
 
   alias Quichex.Native
 
@@ -8,25 +17,50 @@ defmodule Quichex.Native.TestHelpers do
   @cert_path Path.join(@priv_dir, "cert.crt")
   @key_path Path.join(@priv_dir, "cert.key")
 
+  defguardp is_byte(value) when is_integer(value) and value >= 0 and value <= 255
+  defguardp is_udp_port(value) when is_integer(value) and value >= 0 and value <= 65_535
+
+  @type config :: term()
+  @type connection :: term()
+  @type options :: keyword()
+
+  @doc "Create a client-side config mirroring `quiche::Config::new/1` defaults."
+  @spec create_config(options()) :: config()
   def create_config(opts \\ []), do: build_config(:client, opts)
+
+  @doc "Create a server-side config that also loads the repo's self-signed cert/key."
+  @spec accept_config(options()) :: config()
   def accept_config(opts \\ []), do: build_config(:server, opts)
 
+  @doc """
+  Instantiate a client connection resource.
+
+  Accepts optional `:local_port`, `:peer_port`, `:scid`, and TLS overrides.
+  """
+  @spec create_connection(options()) :: {config(), connection()}
   def create_connection(opts \\ []),
     do: build_connection(:client, opts, &Native.connection_new_client/6)
 
+  @doc "Instantiate a server connection resource using `connection_new_server/6`."
+  @spec accept_connection(options()) :: {config(), connection()}
   def accept_connection(opts \\ []),
     do: build_connection(:server, opts, &Native.connection_new_server/6)
 
-  def ipv4({a, b, c, d}, port) do
+  @doc "Encode an IPv4/UDP tuple into the binary format expected by the NIFs."
+  @spec ipv4({0..255, 0..255, 0..255, 0..255}, 0..65_535) :: binary()
+  def ipv4({a, b, c, d}, port)
+      when is_byte(a) and is_byte(b) and is_byte(c) and is_byte(d) and is_udp_port(port) do
     <<a, b, c, d, port::16-big>>
   end
 
+  @doc "Bubble up {:ok, value} tuples or raise on unexpected results."
+  @spec ok!(term()) :: term()
   def ok!(:ok), do: :ok
   def ok!({:ok, {}}), do: :ok
   def ok!({:ok, value}), do: value
   def ok!(other), do: other
 
-  defp build_config(role, opts) do
+  defp build_config(role, opts) when role in [:client, :server] do
     version = Keyword.get(opts, :version, 0)
     {:ok, config} = Native.config_new(version)
 
@@ -57,7 +91,7 @@ defmodule Quichex.Native.TestHelpers do
     end
   end
 
-  defp build_connection(role, opts, nif_fun) do
+  defp build_connection(role, opts, nif_fun) when role in [:client, :server] do
     config =
       Keyword.get_lazy(opts, :config, fn ->
         case role do
