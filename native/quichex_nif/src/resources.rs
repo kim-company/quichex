@@ -1,4 +1,5 @@
 use rustler::{Env, Term};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 /// Wrapper for quiche::Config with thread-safe reference counting
@@ -9,7 +10,7 @@ pub struct ConfigResource {
 /// Wrapper for quiche::Connection with thread-safe reference counting
 pub struct ConnectionResource {
     pub inner: Arc<Mutex<quiche::Connection>>,
-    pub stream_recv_buffer_size: usize,
+    pub known_streams: Arc<Mutex<HashSet<u64>>>,
 }
 
 /// Load resources - called when NIF library is loaded

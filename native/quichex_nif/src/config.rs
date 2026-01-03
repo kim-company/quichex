@@ -1,5 +1,5 @@
 use crate::resources::ConfigResource;
-use rustler::ResourceArc;
+use rustler::{Binary, ResourceArc};
 use std::sync::{Arc, Mutex};
 
 /// Creates a new QUIC configuration with the specified version
@@ -146,10 +146,7 @@ pub fn config_set_initial_max_stream_data_uni(
 
 /// Sets whether to verify the peer's certificate
 #[rustler::nif]
-pub fn config_verify_peer(
-    config: ResourceArc<ConfigResource>,
-    verify: bool,
-) -> Result<(), String> {
+pub fn config_verify_peer(config: ResourceArc<ConfigResource>, verify: bool) -> Result<(), String> {
     let mut cfg = config
         .inner
         .lock()
@@ -306,10 +303,7 @@ pub fn config_set_disable_active_migration(
 
 /// Enables or disables GREASE
 #[rustler::nif]
-pub fn config_grease(
-    config: ResourceArc<ConfigResource>,
-    grease: bool,
-) -> Result<(), String> {
+pub fn config_grease(config: ResourceArc<ConfigResource>, grease: bool) -> Result<(), String> {
     let mut cfg = config
         .inner
         .lock()
@@ -317,4 +311,232 @@ pub fn config_grease(
 
     cfg.grease(grease);
     Ok(())
+}
+
+/// Enables or disables PMTU discovery
+#[rustler::nif]
+pub fn config_discover_pmtu(
+    config: ResourceArc<ConfigResource>,
+    enable: bool,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.discover_pmtu(enable);
+    Ok(())
+}
+
+/// Enables TLS key logging
+#[rustler::nif]
+pub fn config_log_keys(config: ResourceArc<ConfigResource>) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.log_keys();
+    Ok(())
+}
+
+/// Enables 0-RTT early data
+#[rustler::nif]
+pub fn config_enable_early_data(config: ResourceArc<ConfigResource>) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.enable_early_data();
+    Ok(())
+}
+
+/// Sets max amplification factor to protect against amplification attacks
+#[rustler::nif]
+pub fn config_set_max_amplification_factor(
+    config: ResourceArc<ConfigResource>,
+    value: usize,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.set_max_amplification_factor(value);
+    Ok(())
+}
+
+#[rustler::nif]
+pub fn config_set_ack_delay_exponent(
+    config: ResourceArc<ConfigResource>,
+    value: u64,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.set_ack_delay_exponent(value);
+    Ok(())
+}
+
+#[rustler::nif]
+pub fn config_set_max_ack_delay(
+    config: ResourceArc<ConfigResource>,
+    value: u64,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.set_max_ack_delay(value);
+    Ok(())
+}
+
+#[rustler::nif]
+pub fn config_set_initial_congestion_window_packets(
+    config: ResourceArc<ConfigResource>,
+    packets: usize,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.set_initial_congestion_window_packets(packets);
+    Ok(())
+}
+
+#[rustler::nif]
+pub fn config_enable_hystart(
+    config: ResourceArc<ConfigResource>,
+    enable: bool,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.enable_hystart(enable);
+    Ok(())
+}
+
+#[rustler::nif]
+pub fn config_enable_pacing(
+    config: ResourceArc<ConfigResource>,
+    enable: bool,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.enable_pacing(enable);
+    Ok(())
+}
+
+#[rustler::nif]
+pub fn config_set_max_pacing_rate(
+    config: ResourceArc<ConfigResource>,
+    value: u64,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.set_max_pacing_rate(value);
+    Ok(())
+}
+
+#[rustler::nif]
+pub fn config_set_max_connection_window(
+    config: ResourceArc<ConfigResource>,
+    value: u64,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.set_max_connection_window(value);
+    Ok(())
+}
+
+#[rustler::nif]
+pub fn config_set_max_stream_window(
+    config: ResourceArc<ConfigResource>,
+    value: u64,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.set_max_stream_window(value);
+    Ok(())
+}
+
+#[rustler::nif]
+pub fn config_set_active_connection_id_limit(
+    config: ResourceArc<ConfigResource>,
+    value: u64,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.set_active_connection_id_limit(value);
+    Ok(())
+}
+
+#[rustler::nif]
+pub fn config_set_stateless_reset_token(
+    config: ResourceArc<ConfigResource>,
+    token: Binary,
+) -> Result<(), String> {
+    if token.as_slice().len() != 16 {
+        return Err("Stateless reset token must be 16 bytes".to_string());
+    }
+
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    let mut token_bytes = [0u8; 16];
+    token_bytes.copy_from_slice(token.as_slice());
+    cfg.set_stateless_reset_token(Some(u128::from_be_bytes(token_bytes)));
+    Ok(())
+}
+
+#[rustler::nif]
+pub fn config_set_disable_dcid_reuse(
+    config: ResourceArc<ConfigResource>,
+    disable: bool,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.set_disable_dcid_reuse(disable);
+    Ok(())
+}
+
+#[rustler::nif]
+pub fn config_set_ticket_key(
+    config: ResourceArc<ConfigResource>,
+    key: Binary,
+) -> Result<(), String> {
+    let mut cfg = config
+        .inner
+        .lock()
+        .map_err(|e| format!("Lock error: {}", e))?;
+
+    cfg.set_ticket_key(key.as_slice())
+        .map_err(|e| format!("Failed to set ticket key: {:?}", e))
 }

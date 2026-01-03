@@ -1,4 +1,4 @@
-use rustler::{Decoder, Encoder, Env, NifResult, Term};
+use rustler::{Decoder, Encoder, Env, NifResult, NifStruct, Term};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 // Define atoms for map keys
@@ -127,14 +127,123 @@ impl Encoder for SendInfo {
 
         // Convert Instant to elapsed microseconds since epoch for Elixir
         // Note: Elixir will need to interpret this as needed
-        let elapsed_micros = self
-            .at
-            .elapsed()
-            .as_micros()
-            .min(i64::MAX as u128) as i64;
+        let elapsed_micros = self.at.elapsed().as_micros().min(i64::MAX as u128) as i64;
         map.map_put(at_micros().encode(env), elapsed_micros.encode(env))
             .ok()
             .unwrap()
+    }
+}
+
+#[derive(NifStruct, Debug, Clone)]
+#[module = "Quichex.Native.ConnectionError"]
+pub struct ConnectionErrorInfo {
+    pub is_app: bool,
+    pub error_code: u64,
+    pub reason: Option<Vec<u8>>,
+}
+
+impl ConnectionErrorInfo {
+    pub fn from_quiche(err: &quiche::ConnectionError) -> Self {
+        ConnectionErrorInfo {
+            is_app: err.is_app,
+            error_code: err.error_code,
+            reason: if err.reason.is_empty() {
+                None
+            } else {
+                Some(err.reason.clone())
+            },
+        }
+    }
+}
+
+#[derive(NifStruct, Debug, Clone)]
+#[module = "Quichex.Native.ConnectionStats"]
+pub struct ConnectionStats {
+    pub recv: usize,
+    pub sent: usize,
+    pub lost: usize,
+    pub spurious_lost: usize,
+    pub retrans: usize,
+    pub sent_bytes: u64,
+    pub recv_bytes: u64,
+    pub acked_bytes: u64,
+    pub lost_bytes: u64,
+    pub stream_retrans_bytes: u64,
+    pub dgram_recv: usize,
+    pub dgram_sent: usize,
+    pub paths_count: usize,
+    pub reset_stream_count_local: u64,
+    pub stopped_stream_count_local: u64,
+    pub reset_stream_count_remote: u64,
+    pub stopped_stream_count_remote: u64,
+    pub path_challenge_rx_count: u64,
+    pub bytes_in_flight_duration_us: u64,
+}
+
+impl From<quiche::Stats> for ConnectionStats {
+    fn from(stats: quiche::Stats) -> Self {
+        ConnectionStats {
+            recv: stats.recv,
+            sent: stats.sent,
+            lost: stats.lost,
+            spurious_lost: stats.spurious_lost,
+            retrans: stats.retrans,
+            sent_bytes: stats.sent_bytes,
+            recv_bytes: stats.recv_bytes,
+            acked_bytes: stats.acked_bytes,
+            lost_bytes: stats.lost_bytes,
+            stream_retrans_bytes: stats.stream_retrans_bytes,
+            dgram_recv: stats.dgram_recv,
+            dgram_sent: stats.dgram_sent,
+            paths_count: stats.paths_count,
+            reset_stream_count_local: stats.reset_stream_count_local,
+            stopped_stream_count_local: stats.stopped_stream_count_local,
+            reset_stream_count_remote: stats.reset_stream_count_remote,
+            stopped_stream_count_remote: stats.stopped_stream_count_remote,
+            path_challenge_rx_count: stats.path_challenge_rx_count,
+            bytes_in_flight_duration_us: stats
+                .bytes_in_flight_duration
+                .as_micros()
+                .min(u64::MAX as u128) as u64,
+        }
+    }
+}
+
+#[derive(NifStruct, Debug, Clone)]
+#[module = "Quichex.Native.TransportParams"]
+pub struct TransportParams {
+    pub max_idle_timeout: u64,
+    pub max_udp_payload_size: u64,
+    pub initial_max_data: u64,
+    pub initial_max_stream_data_bidi_local: u64,
+    pub initial_max_stream_data_bidi_remote: u64,
+    pub initial_max_stream_data_uni: u64,
+    pub initial_max_streams_bidi: u64,
+    pub initial_max_streams_uni: u64,
+    pub ack_delay_exponent: u64,
+    pub max_ack_delay: u64,
+    pub disable_active_migration: bool,
+    pub active_conn_id_limit: u64,
+    pub max_datagram_frame_size: Option<u64>,
+}
+
+impl From<quiche::TransportParams> for TransportParams {
+    fn from(params: quiche::TransportParams) -> Self {
+        TransportParams {
+            max_idle_timeout: params.max_idle_timeout,
+            max_udp_payload_size: params.max_udp_payload_size,
+            initial_max_data: params.initial_max_data,
+            initial_max_stream_data_bidi_local: params.initial_max_stream_data_bidi_local,
+            initial_max_stream_data_bidi_remote: params.initial_max_stream_data_bidi_remote,
+            initial_max_stream_data_uni: params.initial_max_stream_data_uni,
+            initial_max_streams_bidi: params.initial_max_streams_bidi,
+            initial_max_streams_uni: params.initial_max_streams_uni,
+            ack_delay_exponent: params.ack_delay_exponent,
+            max_ack_delay: params.max_ack_delay,
+            disable_active_migration: params.disable_active_migration,
+            active_conn_id_limit: params.active_conn_id_limit,
+            max_datagram_frame_size: params.max_datagram_frame_size.map(|v| v as u64),
+        }
     }
 }
 
@@ -180,10 +289,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_socket_address() {
-        let addr = SocketAddr::new(
-            IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)),
-            8080,
-        );
+        let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)), 8080);
         let socket_addr = SocketAddress(addr);
         assert_eq!(
             socket_addr.0.ip(),

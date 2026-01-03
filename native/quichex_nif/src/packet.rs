@@ -5,18 +5,18 @@ const MAX_PACKET_SIZE: usize = 1350;
 
 /// Parsed QUIC packet header information
 #[derive(NifStruct)]
-#[module = "Quichex.PacketHeader"]
-pub struct PacketHeader {
+#[module = "Quichex.Native.PacketHeader"]
+pub struct PacketHeader<'a> {
     /// Packet type: "Initial", "Handshake", "ZeroRTT", "Short", "VersionNegotiation", "Retry"
     pub ty: String,
     /// QUIC version number
     pub version: u32,
     /// Destination Connection ID (used for routing packets to connections)
-    pub dcid: Vec<u8>,
+    pub dcid: Binary<'a>,
     /// Source Connection ID
-    pub scid: Vec<u8>,
+    pub scid: Binary<'a>,
     /// Token (present in Initial packets)
-    pub token: Option<Vec<u8>>,
+    pub token: Option<Binary<'a>>,
 }
 
 /// Parses a QUIC packet header without processing the full packet.
@@ -33,10 +33,11 @@ pub struct PacketHeader {
 ///
 /// PacketHeader struct with parsed header fields, or error string if parsing fails
 #[rustler::nif]
-pub fn header_info(
+pub fn header_info<'a>(
+    env: Env<'a>,
     packet: Binary,
     dcid_len: usize,
-) -> Result<PacketHeader, String> {
+) -> Result<PacketHeader<'a>, String> {
     // Need a mutable buffer for quiche::Header::from_slice
     let mut buf = packet.as_slice().to_vec();
 
@@ -55,12 +56,19 @@ pub fn header_info(
     }
     .to_string();
 
+    let dcid = to_binary(env, hdr.dcid.as_ref())?;
+    let scid = to_binary(env, hdr.scid.as_ref())?;
+    let token = match hdr.token {
+        Some(tok) => Some(to_binary(env, &tok)?),
+        None => None,
+    };
+
     Ok(PacketHeader {
         ty,
         version: hdr.version,
-        dcid: hdr.dcid.to_vec(),
-        scid: hdr.scid.to_vec(),
-        token: hdr.token.map(|t| t.to_vec()),
+        dcid,
+        scid,
+        token,
     })
 }
 
@@ -73,18 +81,17 @@ pub fn version_negotiate<'a>(
     scid: Binary,
     dcid: Binary,
 ) -> Result<Binary<'a>, String> {
-    let mut out = vec![0u8; MAX_PACKET_SIZE];
-
+    let mut owned =
+        OwnedBinary::new(MAX_PACKET_SIZE).ok_or_else(|| "Failed to allocate binary".to_string())?;
     let scid_ref = quiche::ConnectionId::from_ref(scid.as_slice());
     let dcid_ref = quiche::ConnectionId::from_ref(dcid.as_slice());
 
-    let written = quiche::negotiate_version(&scid_ref, &dcid_ref, &mut out)
+    let written = quiche::negotiate_version(&scid_ref, &dcid_ref, owned.as_mut_slice())
         .map_err(|e| format!("Version negotiation failed: {:?}", e))?;
 
-    // Create owned binary and convert to Binary
-    let mut owned = OwnedBinary::new(written)
-        .ok_or_else(|| "Failed to allocate binary".to_string())?;
-    owned.as_mut_slice().copy_from_slice(&out[..written]);
+    if written < MAX_PACKET_SIZE && !owned.realloc(written) {
+        return Err("Failed to shrink binary".to_string());
+    }
 
     Ok(Binary::from_owned(owned, env))
 }
@@ -101,8 +108,8 @@ pub fn retry<'a>(
     token: Binary,
     version: u32,
 ) -> Result<Binary<'a>, String> {
-    let mut out = vec![0u8; MAX_PACKET_SIZE];
-
+    let mut owned =
+        OwnedBinary::new(MAX_PACKET_SIZE).ok_or_else(|| "Failed to allocate binary".to_string())?;
     let scid_ref = quiche::ConnectionId::from_ref(scid.as_slice());
     let dcid_ref = quiche::ConnectionId::from_ref(dcid.as_slice());
     let new_scid_ref = quiche::ConnectionId::from_ref(new_scid.as_slice());
@@ -113,14 +120,20 @@ pub fn retry<'a>(
         &new_scid_ref,
         token.as_slice(),
         version,
-        &mut out,
+        owned.as_mut_slice(),
     )
     .map_err(|e| format!("Retry packet generation failed: {:?}", e))?;
 
-    // Create owned binary and convert to Binary
-    let mut owned = OwnedBinary::new(written)
-        .ok_or_else(|| "Failed to allocate binary".to_string())?;
-    owned.as_mut_slice().copy_from_slice(&out[..written]);
+    if written < MAX_PACKET_SIZE && !owned.realloc(written) {
+        return Err("Failed to shrink binary".to_string());
+    }
 
+    Ok(Binary::from_owned(owned, env))
+}
+
+fn to_binary<'a>(env: Env<'a>, data: &[u8]) -> Result<Binary<'a>, String> {
+    let mut owned =
+        OwnedBinary::new(data.len()).ok_or_else(|| "Failed to allocate binary".to_string())?;
+    owned.as_mut_slice().copy_from_slice(data);
     Ok(Binary::from_owned(owned, env))
 }
