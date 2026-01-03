@@ -8,8 +8,8 @@ defmodule Quichex.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      # ConnectionRegistry manages all QUIC connections
-      {Quichex.ConnectionRegistry, []}
+      Quichex.HandlerExecutor,
+      Quichex.ConnectionRegistry
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html

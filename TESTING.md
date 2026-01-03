@@ -44,7 +44,7 @@ Quichex tests are organized into distinct layers based on what they're testing:
 
 **Layer**: `Connection.start_link/1` via `start_link_supervised!/1`
 
-Unit tests bypass the ConnectionRegistry supervisor to test Connection functionality in isolation. They use:
+Unit tests bypass the ConnectionRegistry pool to test Connection functionality in isolation. They use:
 - **Direct API**: `start_link_supervised!({Connection, opts})`
 - **Test Handler**: `Quichex.Test.NoOpHandler` (no message notifications)
 - **ExUnit Supervisor**: Automatic cleanup, no manual process management
@@ -77,9 +77,9 @@ end
 
 Integration tests use the full production supervision tree:
 - **Public API**: `Quichex.start_connection/1`
-- **Supervision**: Via ConnectionRegistry (DynamicSupervisor)
+- **Supervision**: Via ConnectionRegistry pool (bounded worker slots)
 - **Default Handler**: `Quichex.Handler.Default` (sends messages)
-- **Async**: False for listener tests (shared ConnectionRegistry)
+- **Async**: False for listener tests (shared ConnectionRegistry pool)
 
 **Benefits**:
 - Tests real supervision behavior
@@ -93,7 +93,7 @@ test "echo test" do
   {:ok, client} = ListenerHelpers.start_client(port,
     handler_opts: [controlling_process: self()]
   )
-  # Uses full supervision via ConnectionRegistry
+  # Uses full supervision via ConnectionRegistry pool
   assert_receive {:quic_connected, ^client}
 end
 ```
@@ -218,7 +218,7 @@ Location: `test/quichex/listener_integration_test.exs`
 7. ✅ Large data transfer (100KB bidirectional)
 
 **Test Configuration**:
-- `async: false` - Tests share global ConnectionRegistry
+- `async: false` - Tests share global ConnectionRegistry pool
 - Uses full supervision path via `Quichex.start_connection/1`
 - EchoHandler for server-side message handling
 - Clean output: No error logs

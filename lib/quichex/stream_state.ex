@@ -63,19 +63,26 @@ defmodule Quichex.StreamState do
       iex> StreamState.new(7, :unidirectional)
       %StreamState{stream_id: 7, type: :unidirectional, direction: :send}
   """
-  @spec new(stream_id(), stream_type()) :: t()
-  def new(stream_id, type) when type in [:bidirectional, :unidirectional] do
+  import Bitwise
+
+  @spec new(stream_id(), stream_type(), keyword()) :: t()
+  def new(stream_id, type, opts \\ []) when type in [:bidirectional, :unidirectional] do
     direction =
-      case type do
-        :bidirectional -> :both
-        :unidirectional -> if rem(stream_id, 2) == 0, do: :send, else: :recv
-      end
+      Keyword.get_lazy(opts, :direction, fn ->
+        default_direction(stream_id, type)
+      end)
 
     %__MODULE__{
       stream_id: stream_id,
       type: type,
       direction: direction
     }
+  end
+
+  defp default_direction(_stream_id, :bidirectional), do: :both
+
+  defp default_direction(stream_id, :unidirectional) do
+    if band(stream_id, 1) == 0, do: :send, else: :recv
   end
 
   @doc """

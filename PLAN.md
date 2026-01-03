@@ -15,7 +15,7 @@
 - **Handler System**: Declarative event handling with action returns
   - `Handler.Default`: Message-based API (backward compatible)
   - Custom handlers: Declarative action-based control flow (required for server)
-- **Supervision**: ConnectionRegistry (DynamicSupervisor) with `:temporary` restart strategy
+- **Supervision**: ConnectionRegistry pool with `:temporary` connection supervisors per slot
 - **Telemetry**: Comprehensive instrumentation for performance monitoring and observability ✨
 - **Tests**: **71/71 tests passing (100%)** - clean output, production-ready ✅
   - 58 unit tests + 1 doctest + 12 telemetry tests
@@ -84,7 +84,7 @@ Quichex will be a production-ready QUIC transport library for Elixir that levera
 │  - Quichex.Handler (behaviour for event handling)       │
 │  - Quichex.Handler.Default (message-based API)          │
 │  - Quichex.Config (struct + builder)                    │
-│  - Quichex.ConnectionRegistry (DynamicSupervisor)       │
+│  - Quichex.ConnectionRegistry (connection pool)         │
 │  - Quichex.Listener (GenServer) [TODO]                  │
 └─────────────────────────────────────────────────────────┘
                           │
@@ -121,7 +121,7 @@ Quichex will be a production-ready QUIC transport library for Elixir that levera
   - `Handler.Default`: Sends messages to controlling process (imperative API)
   - Custom handlers: Return actions for declarative control flow
 - **Socket Mode**: Always `{active, true}` for minimum latency
-- **Supervision**: `ConnectionRegistry` (DynamicSupervisor) manages all connections
+- **Supervision**: `ConnectionRegistry` pool manages all connections
 
 ### Handler Actions
 Handlers can return actions executed immediately by the connection:
@@ -866,7 +866,7 @@ Quichex.Connection.close(conn)
   - **DCID-based packet routing** (critical fix: use server's SCID as routing key)
   - Connection acceptance and supervision
   - Connection lifecycle management (monitoring, cleanup)
-  - Integration with ConnectionRegistry
+  - Integration with ConnectionRegistry pool
 
 #### Server Connection Support
 
@@ -900,7 +900,7 @@ Quichex.Connection.close(conn)
 **Test Quality**:
 - Clean output: No error logs
 - Stability: 100% pass rate over multiple runs
-- Runtime: ~1.7 seconds (async: false due to shared ConnectionRegistry)
+- Runtime: ~1.7 seconds (async: false due to shared ConnectionRegistry pool)
 
 #### Test Infrastructure
 
@@ -911,7 +911,7 @@ Quichex.Connection.close(conn)
 - ✅ Test configurations (server and client configs with proper ALPN)
 - ✅ **Test Layer Architecture**:
   - Unit tests: Direct `Connection.start_link/1` with `NoOpHandler`
-  - Integration tests: Public API via ConnectionRegistry with `Handler.Default`
+  - Integration tests: Public API via ConnectionRegistry pool with `Handler.Default`
 - ✅ **Supervision**: Connections use `:temporary` restart strategy (correct OTP pattern)
 
 #### Test Restructuring (December 2025)
@@ -958,7 +958,7 @@ Quichex.Connection.close(conn)
    - Used `:binary.bin_to_list()` and `:binary.list_to_bin()` for conversions
 
 5. **Test Layer Architecture**: Unit vs Integration tests need distinct approaches
-   - **Unit tests**: Use `start_link_supervised!({Connection, opts})` to bypass ConnectionRegistry
+   - **Unit tests**: Use `start_link_supervised!({Connection, opts})` to bypass ConnectionRegistry pool
    - **Integration tests**: Use `Quichex.start_connection/1` to test full supervision path
    - **NoOpHandler**: Prevents error logs from handler messages sent to ExUnit supervisor
    - **Temporary Restart**: Connections should use `:temporary` restart strategy (never restart)

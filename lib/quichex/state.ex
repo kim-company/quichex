@@ -16,6 +16,7 @@ defmodule Quichex.State do
   """
 
   alias Quichex.StreamState
+  import Bitwise
 
   @type workload_mode :: :http | :webtransport | :auto
   @type connection_mode :: :client | :server
@@ -139,16 +140,45 @@ defmodule Quichex.State do
   @doc """
   Gets or creates a stream state.
   """
-  @spec get_or_create_stream(t(), StreamState.stream_id(), StreamState.stream_type()) ::
+  @spec get_or_create_stream(t(), StreamState.stream_id(), StreamState.stream_type() | nil) ::
           {StreamState.t(), t()}
-  def get_or_create_stream(%__MODULE__{} = state, stream_id, type) do
+  def get_or_create_stream(%__MODULE__{} = state, stream_id, type_hint \\ nil) do
     case Map.get(state.streams, stream_id) do
       nil ->
-        stream = StreamState.new(stream_id, type)
+        inferred_type = stream_type(stream_id)
+        type = type_hint || inferred_type
+        direction = stream_direction(state, stream_id, type)
+        stream = StreamState.new(stream_id, type, direction: direction)
         {stream, put_in(state.streams[stream_id], stream)}
 
       stream ->
         {stream, state}
+    end
+  end
+
+  @spec stream_type(StreamState.stream_id()) :: StreamState.stream_type()
+  def stream_type(stream_id) do
+    if band(stream_id, 0b10) == 0, do: :bidirectional, else: :unidirectional
+  end
+
+  @spec stream_owner(t(), StreamState.stream_id()) :: :local | :remote
+  def stream_owner(%__MODULE__{connection_mode: conn_mode}, stream_id) do
+    initiator = if band(stream_id, 1) == 0, do: :client, else: :server
+
+    case {conn_mode, initiator} do
+      {:client, :client} -> :local
+      {:client, :server} -> :remote
+      {:server, :server} -> :local
+      {:server, :client} -> :remote
+    end
+  end
+
+  defp stream_direction(_state, _stream_id, :bidirectional), do: :both
+
+  defp stream_direction(state, stream_id, :unidirectional) do
+    case stream_owner(state, stream_id) do
+      :local -> :send
+      :remote -> :recv
     end
   end
 
