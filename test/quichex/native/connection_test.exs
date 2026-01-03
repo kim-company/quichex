@@ -2,7 +2,7 @@ defmodule Quichex.Native.ConnectionTest do
   use ExUnit.Case, async: true
 
   alias Quichex.Native
-  alias Quichex.Native.ConnectionStats
+  alias Quichex.Native.{ConnectionStats, TransportParams}
   import Quichex.Native.TestHelpers
 
   describe "metadata accessors" do
@@ -131,6 +131,110 @@ defmodule Quichex.Native.ConnectionTest do
     end
   end
 
+  describe "transport params and stats" do
+    test "expose negotiated limits and account for datagrams" do
+      {{_client_config, client}, {_server_config, server}} = handshake_pair()
+
+      assert {:ok, %TransportParams{} = params} =
+               Native.connection_peer_transport_params(server)
+
+      assert params.initial_max_data == 1_000_000
+      assert params.initial_max_streams_bidi == 32
+      assert params.max_datagram_frame_size >= 1200
+
+      payload = "stats hello"
+      payload_len = byte_size(payload)
+      assert {:ok, ^payload_len} = Native.connection_stream_send(client, 0, payload, true)
+
+      pump_until(client, server, fn -> stream_readable?(server, 0) end)
+      assert {:ok, {^payload, true}} = Native.connection_stream_recv(server, 0, 4096)
+
+      datagram = :crypto.strong_rand_bytes(24)
+      assert {:ok, 24} = Native.connection_dgram_send(client, datagram)
+
+      pump_until(client, server, fn ->
+        match?({:ok, len} when len > 0, Native.connection_dgram_recv_queue_len(server))
+      end)
+
+      assert {:ok, ^datagram} = Native.connection_dgram_recv(server, 1350)
+
+      assert {:ok, %ConnectionStats{} = client_stats} = Native.connection_stats(client)
+      assert client_stats.sent > 0
+      assert client_stats.sent_bytes >= payload_len
+
+      assert {:ok, %ConnectionStats{} = server_stats} = Native.connection_stats(server)
+      assert server_stats.recv > 0
+      assert server_stats.recv_bytes >= byte_size(payload)
+    end
+  end
+
+  describe "session management" do
+    test "captures TLS session blobs and resumes quickly" do
+      {{client_config, client}, {server_config, _server}} = handshake_pair()
+
+      assert {:ok, session} = Native.connection_session(client)
+      assert is_binary(session)
+      assert byte_size(session) > 0
+
+      {client_port, server_port} = unique_ports()
+
+      {_, resumed_client} =
+        create_connection(
+          config: client_config,
+          local_port: client_port,
+          peer_port: server_port
+        )
+
+      assert :ok = ok!(Native.connection_set_session(resumed_client, session))
+
+      {_, resumed_server} =
+        accept_connection(
+          config: server_config,
+          local_port: server_port,
+          peer_port: client_port
+        )
+
+      pump_until(resumed_client, resumed_server, fn ->
+        match?({:ok, true}, Native.connection_is_established(resumed_client)) and
+          match?({:ok, true}, Native.connection_is_established(resumed_server))
+      end)
+
+      assert {:ok, true} = Native.connection_is_resumed(resumed_client)
+      assert {:ok, false} = Native.connection_is_in_early_data(resumed_client)
+      assert {:ok, session_copy} = Native.connection_session(resumed_client)
+      assert is_binary(session_copy)
+
+      # Server sees transport params even on resumed handshakes.
+      assert {:ok, %TransportParams{}} =
+               Native.connection_peer_transport_params(resumed_server)
+    end
+  end
+
+  describe "error handling" do
+    test "stream send returns descriptive errors after close" do
+      {_config, conn} = create_connection()
+      assert :ok = ok!(Native.connection_close(conn, false, 0x10, "closing"))
+      assert {:error, reason} = Native.connection_stream_send(conn, 0, "late", false)
+      assert reason =~ "Stream send error"
+    end
+
+    test "stream shutdown validates direction" do
+      {_config, conn} = create_connection()
+      assert {:error, message} = Native.connection_stream_shutdown(conn, 0, "north", 0)
+      assert message =~ "Invalid direction"
+    end
+
+    test "datagram recv rejects zero-length buffers" do
+      {_config, conn} = create_connection()
+      assert {:error, "max_len must be greater than zero"} = Native.connection_dgram_recv(conn, 0)
+    end
+
+    test "connection_on_timeout is always safe" do
+      {_config, conn} = create_connection()
+      assert :ok = ok!(Native.connection_on_timeout(conn))
+    end
+  end
+
   describe "client/server via :socket" do
     @tag timeout: 120
     test "handshake, stream, and datagram over real UDP sockets" do
@@ -203,9 +307,19 @@ defmodule Quichex.Native.ConnectionTest do
     end
   end
 
-  defp handshake_pair do
-    {client_config, client_conn} = create_connection(local_port: 4000, peer_port: 5000)
-    {server_config, server_conn} = accept_connection(local_port: 5000, peer_port: 4000)
+  defp handshake_pair(opts \\ []) do
+    {client_port, server_port} = handshake_ports(opts)
+
+    client_opts =
+      [local_port: client_port, peer_port: server_port]
+      |> Keyword.merge(Keyword.get(opts, :client_opts, []))
+
+    server_opts =
+      [local_port: server_port, peer_port: client_port]
+      |> Keyword.merge(Keyword.get(opts, :server_opts, []))
+
+    {client_config, client_conn} = create_connection(client_opts)
+    {server_config, server_conn} = accept_connection(server_opts)
 
     pump_until(client_conn, server_conn, fn ->
       match?({:ok, true}, Native.connection_is_established(client_conn)) and
@@ -213,6 +327,17 @@ defmodule Quichex.Native.ConnectionTest do
     end)
 
     {{client_config, client_conn}, {server_config, server_conn}}
+  end
+
+  defp handshake_ports(opts) do
+    base = System.unique_integer([:positive])
+    client_port = Keyword.get(opts, :client_port, 40_000 + rem(base, 1000))
+    server_port = Keyword.get(opts, :server_port, 45_000 + rem(base, 1000))
+    {client_port, server_port}
+  end
+
+  defp unique_ports do
+    handshake_ports([])
   end
 
   defp pump_until(client, server, predicate, attempts \\ 0)

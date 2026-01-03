@@ -3,8 +3,13 @@ defmodule Quichex.Native do
   Thin Rustler bindings to the [`quiche`](https://github.com/cloudflare/quiche)
   QUIC implementation.
 
-  All functions are direct wrappers around the Rust NIFs and return `{:ok, term}`
-  or `{:error, reason}` tuples straight from the native layer.
+  These functions provide a direct bridge to the native library and always
+  return `{:ok, term}` / `{:error, reason}` tuples. Complex return values
+  such as `Quichex.Native.ConnectionStats` or `Quichex.Native.TransportParams`
+  are kept in lockstep with their Rust counterparts; see
+  `test/quichex/native/connection_test.exs` for end-to-end usage patterns
+  including client/server handshakes, stream I/O, datagrams, and TLS session
+  resumption.
   """
 
   use Rustler,

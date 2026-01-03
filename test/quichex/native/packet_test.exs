@@ -22,6 +22,11 @@ defmodule Quichex.Native.PacketTest do
 
     assert {:ok, retry_packet} = Native.retry(scid, dcid, scid, token, 1)
     assert is_binary(retry_packet)
+
+    assert {:ok, %PacketHeader{token: parsed_token}} =
+             Native.header_info(retry_packet, byte_size(dcid))
+
+    assert parsed_token == token
   end
 
   test "rejects malformed headers" do
