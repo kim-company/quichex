@@ -10,11 +10,11 @@ defmodule Quichex.Native do
 
   alias Quichex.Native.{ConfigError, Nif}
 
-  @type config :: Nif.config()
-  @type connection :: Nif.connection()
-  @type stream_id :: Nif.stream_id()
-  @type reason :: Nif.reason()
-  @type quic_binary :: Nif.quic_binary()
+  @type config :: reference()
+  @type connection :: reference()
+  @type stream_id :: non_neg_integer()
+  @type reason :: String.t()
+  @type quic_binary :: binary()
 
   @spec config_new(non_neg_integer()) :: config()
   def config_new(version) do
@@ -299,7 +299,7 @@ defmodule Quichex.Native do
   Code.ensure_compiled!(Nif)
 
   for {name, arity} <- Nif.__info__(:functions),
-      name not in [:__info__, :module_info],
+      name not in [:__info__, :module_info, :rustler_init],
       not String.starts_with?(Atom.to_string(name), "config_") do
     args = Macro.generate_arguments(arity, __MODULE__)
     defdelegate unquote(name)(unquote_splicing(args)), to: Nif

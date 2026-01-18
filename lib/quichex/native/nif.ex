@@ -1,5 +1,7 @@
 defmodule Quichex.Native.Nif do
-  @moduledoc false
+  @moduledoc """
+  Internal Rustler bindings. Prefer `Quichex.Native` for public usage.
+  """
 
   use Rustler,
     otp_app: :quichex,
