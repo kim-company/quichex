@@ -151,6 +151,7 @@ defmodule Quichex.H3 do
   defp unwrap_ok!(function, result, fallback \\ nil) do
     case result do
       :ok -> fallback
+      {:ok, {}} -> fallback
       {:ok, value} -> value
       {:error, reason} ->
         raise Quichex.Native.ConfigError,
