@@ -1,6 +1,9 @@
 defmodule Quichex.WebTransport do
   @moduledoc """
   Minimal WebTransport helpers built on top of `Quichex.H3`.
+
+  This module focuses on CONNECT headers, status parsing, and datagram helpers.
+  Stream management and request/response polling remain in `Quichex.H3`.
   """
 
   alias Quichex.H3

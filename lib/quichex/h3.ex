@@ -1,6 +1,11 @@
 defmodule Quichex.H3 do
   @moduledoc """
   Low-level HTTP/3 bindings built on top of `Quichex.Native`.
+
+  Provides direct access to HTTP/3 config and connection APIs. Events returned
+  by `conn_poll/2` are normalized so `{:headers, headers, more}` mirrors the
+  HTTP/3 HEADERS event. For datagrams, `send_datagram/3` and `recv_datagram/2`
+  encode/decode the QUIC varint flow id (WebTransport uses the CONNECT stream id).
   """
 
   import Bitwise

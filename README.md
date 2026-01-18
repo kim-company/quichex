@@ -11,6 +11,8 @@ on failure.
 
 - Build QUIC client and server connections directly from Elixir, including TLS
   configuration and datagram support.
+- Create HTTP/3 connections and exchange request/response headers and bodies.
+- Build WebTransport CONNECT headers and send/receive WebTransport datagrams.
 - Inspect negotiated transport parameters, runtime stats, connection IDs, and
   peer errors via strongly typed structs.
 - Drive streams and datagrams using either in-VM helpers (see
@@ -30,12 +32,48 @@ alias Quichex.Native.TestHelpers
 :ok = TestHelpers.ok!(Quichex.Native.connection_stream_send(client, 0, "hi", true))
 ```
 
+## HTTP/3 Example
+
+```elixir
+alias Quichex.H3
+
+# assumes `conn` is an established QUIC connection
+h3_config = H3.config_new()
+h3_conn = H3.conn_new_with_transport(conn, h3_config)
+
+stream_id =
+  H3.send_request(conn, h3_conn, [
+    {":method", "GET"},
+    {":scheme", "https"},
+    {":authority", "localhost"},
+    {":path", "/"}
+  ], true)
+
+_ = H3.conn_poll(conn, h3_conn)
+```
+
+## WebTransport Example
+
+```elixir
+alias Quichex.WebTransport
+
+# assumes `conn` + `h3_conn` are ready for HTTP/3
+stream_id = WebTransport.connect(conn, h3_conn, "localhost", "/moq")
+WebTransport.send_datagram(conn, stream_id, "ping")
+```
+
 ## Testing
 
 All tests can be run with:
 
 ```bash
 mix test
+```
+
+External HTTP/3 integration tests can be run with:
+
+```bash
+QUICHEX_INTEGRATION=1 mix test test/quichex/h3_integration_test.exs
 ```
 
 The suite exercises:
