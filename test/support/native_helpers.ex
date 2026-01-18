@@ -62,21 +62,22 @@ defmodule Quichex.Native.TestHelpers do
 
   defp build_config(role, opts) when role in [:client, :server] do
     version = Keyword.get(opts, :version, 0)
-    {:ok, config} = Native.config_new(version)
-
     protos = Keyword.get(opts, :protos, @default_protos)
-    ok!(Native.config_set_application_protos(config, protos))
-    ok!(Native.config_verify_peer(config, false))
-    ok!(Native.config_enable_dgram(config, true, 32, 32))
-    ok!(Native.config_set_max_recv_udp_payload_size(config, 1350))
-    ok!(Native.config_set_max_send_udp_payload_size(config, 1350))
-    ok!(Native.config_set_initial_max_data(config, 1_000_000))
-    ok!(Native.config_set_initial_max_stream_data_bidi_local(config, 1_000_000))
-    ok!(Native.config_set_initial_max_stream_data_bidi_remote(config, 1_000_000))
-    ok!(Native.config_set_initial_max_stream_data_uni(config, 1_000_000))
-    ok!(Native.config_set_initial_max_streams_bidi(config, 32))
-    ok!(Native.config_set_initial_max_streams_uni(config, 32))
-    ok!(Native.config_set_disable_active_migration(config, true))
+
+    config =
+      Native.config_new(version)
+      |> Native.config_set_application_protos(protos)
+      |> Native.config_verify_peer(false)
+      |> Native.config_enable_dgram(true, 32, 32)
+      |> Native.config_set_max_recv_udp_payload_size(1350)
+      |> Native.config_set_max_send_udp_payload_size(1350)
+      |> Native.config_set_initial_max_data(1_000_000)
+      |> Native.config_set_initial_max_stream_data_bidi_local(1_000_000)
+      |> Native.config_set_initial_max_stream_data_bidi_remote(1_000_000)
+      |> Native.config_set_initial_max_stream_data_uni(1_000_000)
+      |> Native.config_set_initial_max_streams_bidi(32)
+      |> Native.config_set_initial_max_streams_uni(32)
+      |> Native.config_set_disable_active_migration(true)
 
     case role do
       :client ->
@@ -85,9 +86,10 @@ defmodule Quichex.Native.TestHelpers do
       :server ->
         cert = Keyword.get(opts, :cert, @cert_path)
         key = Keyword.get(opts, :key, @key_path)
-        ok!(Native.config_load_cert_chain_from_pem_file(config, cert))
-        ok!(Native.config_load_priv_key_from_pem_file(config, key))
+
         config
+        |> Native.config_load_cert_chain_from_pem_file(cert)
+        |> Native.config_load_priv_key_from_pem_file(key)
     end
   end
 

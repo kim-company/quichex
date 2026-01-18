@@ -3,8 +3,9 @@
 Quichex exposes the [cloudflare/quiche](https://github.com/cloudflare/quiche)
 QUIC implementation to Elixir via Rustler. The public API currently lives under
 `Quichex.Native`, providing direct access to connection/configuration/packet
-helpers while keeping the return values idiomatic (`{:ok, term}` /
-`{:error, reason}`).
+helpers. Most calls return `{:ok, term}` / `{:error, reason}` tuples, while
+config setters return the config reference and raise `Quichex.Native.ConfigError`
+on failure.
 
 ## Capabilities
 

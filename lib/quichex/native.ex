@@ -3,333 +3,305 @@ defmodule Quichex.Native do
   Thin Rustler bindings to the [`quiche`](https://github.com/cloudflare/quiche)
   QUIC implementation.
 
-  These functions provide a direct bridge to the native library and always
-  return `{:ok, term}` / `{:error, reason}` tuples. Complex return values
-  such as `Quichex.Native.ConnectionStats` or `Quichex.Native.TransportParams`
-  are kept in lockstep with their Rust counterparts; see
-  `test/quichex/native/connection_test.exs` for end-to-end usage patterns
-  including client/server handshakes, stream I/O, datagrams, and TLS session
-  resumption.
+  These functions provide a direct bridge to the native library. Most NIFs
+  return `{:ok, term}` / `{:error, reason}` tuples, while config setters return
+  the updated config and raise `Quichex.Native.ConfigError` on failures.
   """
 
-  use Rustler,
-    otp_app: :quichex,
-    crate: :quichex_nif
-
-  @type config :: reference()
-  @type connection :: reference()
-  @type stream_id :: non_neg_integer()
-  @type reason :: String.t()
-  @type quic_binary :: binary()
-
-  ## Misc helpers
-  @spec add(term(), term()) :: {:ok, term()} | {:error, reason()}
-  def add(_a, _b), do: error()
-
-  ## Config NIFs
-  @spec config_new(non_neg_integer()) :: {:ok, config()} | {:error, reason()}
-  def config_new(_version), do: error()
-
-  @spec config_set_application_protos(config(), [quic_binary()]) :: :ok | {:error, reason()}
-  def config_set_application_protos(_config, _protos), do: error()
-
-  @spec config_set_max_idle_timeout(config(), non_neg_integer()) :: :ok | {:error, reason()}
-  def config_set_max_idle_timeout(_config, _millis), do: error()
-
-  @spec config_set_initial_max_streams_bidi(config(), non_neg_integer()) ::
-          :ok | {:error, reason()}
-  def config_set_initial_max_streams_bidi(_config, _value), do: error()
-
-  @spec config_set_initial_max_streams_uni(config(), non_neg_integer()) ::
-          :ok | {:error, reason()}
-  def config_set_initial_max_streams_uni(_config, _value), do: error()
-
-  @spec config_set_initial_max_data(config(), non_neg_integer()) :: :ok | {:error, reason()}
-  def config_set_initial_max_data(_config, _value), do: error()
-
-  @spec config_set_initial_max_stream_data_bidi_local(config(), non_neg_integer()) ::
-          :ok | {:error, reason()}
-  def config_set_initial_max_stream_data_bidi_local(_config, _value), do: error()
-
-  @spec config_set_initial_max_stream_data_bidi_remote(config(), non_neg_integer()) ::
-          :ok | {:error, reason()}
-  def config_set_initial_max_stream_data_bidi_remote(_config, _value), do: error()
-
-  @spec config_set_initial_max_stream_data_uni(config(), non_neg_integer()) ::
-          :ok | {:error, reason()}
-  def config_set_initial_max_stream_data_uni(_config, _value), do: error()
-
-  @spec config_verify_peer(config(), boolean()) :: :ok | {:error, reason()}
-  def config_verify_peer(_config, _verify), do: error()
-
-  @spec config_load_cert_chain_from_pem_file(config(), String.t()) :: :ok | {:error, reason()}
-  def config_load_cert_chain_from_pem_file(_config, _path), do: error()
-
-  @spec config_load_priv_key_from_pem_file(config(), String.t()) :: :ok | {:error, reason()}
-  def config_load_priv_key_from_pem_file(_config, _path), do: error()
-
-  @spec config_load_verify_locations_from_file(config(), String.t()) :: :ok | {:error, reason()}
-  def config_load_verify_locations_from_file(_config, _path), do: error()
-
-  @spec config_load_verify_locations_from_directory(config(), String.t()) ::
-          :ok | {:error, reason()}
-  def config_load_verify_locations_from_directory(_config, _path), do: error()
-
-  @spec config_set_cc_algorithm(config(), String.t()) :: :ok | {:error, reason()}
-  def config_set_cc_algorithm(_config, _algo), do: error()
-
-  @spec config_enable_dgram(config(), boolean(), non_neg_integer(), non_neg_integer()) ::
-          :ok | {:error, reason()}
-  def config_enable_dgram(_config, _enabled, _recv_queue_len, _send_queue_len), do: error()
-
-  @spec config_set_max_recv_udp_payload_size(config(), non_neg_integer()) ::
-          :ok | {:error, reason()}
-  def config_set_max_recv_udp_payload_size(_config, _size), do: error()
-
-  @spec config_set_max_send_udp_payload_size(config(), non_neg_integer()) ::
-          :ok | {:error, reason()}
-  def config_set_max_send_udp_payload_size(_config, _size), do: error()
-
-  @spec config_set_disable_active_migration(config(), boolean()) :: :ok | {:error, reason()}
-  def config_set_disable_active_migration(_config, _disable), do: error()
-
-  @spec config_grease(config(), boolean()) :: :ok | {:error, reason()}
-  def config_grease(_config, _enable), do: error()
-
-  @spec config_discover_pmtu(config(), boolean()) :: :ok | {:error, reason()}
-  def config_discover_pmtu(_config, _enable), do: error()
-
-  @spec config_log_keys(config()) :: :ok | {:error, reason()}
-  def config_log_keys(_config), do: error()
-
-  @spec config_enable_early_data(config()) :: :ok | {:error, reason()}
-  def config_enable_early_data(_config), do: error()
-
-  @spec config_set_max_amplification_factor(config(), non_neg_integer()) ::
-          :ok | {:error, reason()}
-  def config_set_max_amplification_factor(_config, _value), do: error()
-
-  @spec config_set_ack_delay_exponent(config(), non_neg_integer()) :: :ok | {:error, reason()}
-  def config_set_ack_delay_exponent(_config, _value), do: error()
-
-  @spec config_set_max_ack_delay(config(), non_neg_integer()) :: :ok | {:error, reason()}
-  def config_set_max_ack_delay(_config, _value), do: error()
-
-  @spec config_set_initial_congestion_window_packets(config(), non_neg_integer()) ::
-          :ok | {:error, reason()}
-  def config_set_initial_congestion_window_packets(_config, _value), do: error()
-
-  @spec config_enable_hystart(config(), boolean()) :: :ok | {:error, reason()}
-  def config_enable_hystart(_config, _enable), do: error()
-
-  @spec config_enable_pacing(config(), boolean()) :: :ok | {:error, reason()}
-  def config_enable_pacing(_config, _enable), do: error()
-
-  @spec config_set_max_pacing_rate(config(), non_neg_integer()) :: :ok | {:error, reason()}
-  def config_set_max_pacing_rate(_config, _value), do: error()
-
-  @spec config_set_max_connection_window(config(), non_neg_integer()) ::
-          :ok | {:error, reason()}
-  def config_set_max_connection_window(_config, _value), do: error()
-
-  @spec config_set_max_stream_window(config(), non_neg_integer()) :: :ok | {:error, reason()}
-  def config_set_max_stream_window(_config, _value), do: error()
-
-  @spec config_set_active_connection_id_limit(config(), non_neg_integer()) ::
-          :ok | {:error, reason()}
-  def config_set_active_connection_id_limit(_config, _value), do: error()
-
-  @spec config_set_stateless_reset_token(config(), quic_binary()) :: :ok | {:error, reason()}
-  def config_set_stateless_reset_token(_config, _token), do: error()
-
-  @spec config_set_disable_dcid_reuse(config(), boolean()) :: :ok | {:error, reason()}
-  def config_set_disable_dcid_reuse(_config, _disable), do: error()
-
-  @spec config_set_ticket_key(config(), quic_binary()) :: :ok | {:error, reason()}
-  def config_set_ticket_key(_config, _key), do: error()
-
-  ## Connection lifecycle NIFs
-  @spec connection_new_client(
-          quic_binary(),
-          String.t() | nil,
-          quic_binary(),
-          quic_binary(),
-          config(),
-          non_neg_integer()
-        ) :: {:ok, connection()} | {:error, reason()}
-  def connection_new_client(
-        _scid,
-        _server_name,
-        _local_addr,
-        _peer_addr,
-        _config,
-        _stream_recv_buffer_size
-      ),
-      do: error()
-
-  @spec connection_new_server(
-          quic_binary(),
-          quic_binary() | nil,
-          quic_binary(),
-          quic_binary(),
-          config(),
-          non_neg_integer()
-        ) :: {:ok, connection()} | {:error, reason()}
-  def connection_new_server(
-        _scid,
-        _odcid,
-        _local_addr,
-        _peer_addr,
-        _config,
-        _stream_recv_buffer_size
-      ),
-      do: error()
-
-  @spec connection_recv(connection(), quic_binary(), map()) ::
-          {:ok, non_neg_integer()} | {:error, reason()}
-  def connection_recv(_conn, _packet, _recv_info), do: error()
-
-  @spec connection_send(connection()) :: {:ok, {quic_binary(), map()}} | {:error, reason()}
-  def connection_send(_conn), do: error()
-
-  @spec connection_timeout(connection()) :: {:ok, non_neg_integer()} | {:error, reason()}
-  def connection_timeout(_conn), do: error()
-
-  @spec connection_on_timeout(connection()) :: :ok | {:error, reason()}
-  def connection_on_timeout(_conn), do: error()
-
-  @spec connection_is_established(connection()) :: {:ok, boolean()} | {:error, reason()}
-  def connection_is_established(_conn), do: error()
-
-  @spec connection_is_closed(connection()) :: {:ok, boolean()} | {:error, reason()}
-  def connection_is_closed(_conn), do: error()
-
-  @spec connection_is_draining(connection()) :: {:ok, boolean()} | {:error, reason()}
-  def connection_is_draining(_conn), do: error()
-
-  @spec connection_is_resumed(connection()) :: {:ok, boolean()} | {:error, reason()}
-  def connection_is_resumed(_conn), do: error()
-
-  @spec connection_is_timed_out(connection()) :: {:ok, boolean()} | {:error, reason()}
-  def connection_is_timed_out(_conn), do: error()
-
-  @spec connection_is_server(connection()) :: {:ok, boolean()} | {:error, reason()}
-  def connection_is_server(_conn), do: error()
-
-  @spec connection_close(connection(), boolean(), non_neg_integer(), quic_binary()) ::
-          :ok | {:error, reason()}
-  def connection_close(_conn, _app, _err, _reason), do: error()
-
-  @spec connection_trace_id(connection()) :: {:ok, String.t()} | {:error, reason()}
-  def connection_trace_id(_conn), do: error()
-
-  @spec connection_source_id(connection()) :: {:ok, quic_binary()} | {:error, reason()}
-  def connection_source_id(_conn), do: error()
-
-  @spec connection_destination_id(connection()) :: {:ok, quic_binary()} | {:error, reason()}
-  def connection_destination_id(_conn), do: error()
-
-  @spec connection_application_proto(connection()) :: {:ok, quic_binary()} | {:error, reason()}
-  def connection_application_proto(_conn), do: error()
-
-  @spec connection_peer_cert(connection()) :: {:ok, quic_binary() | nil} | {:error, reason()}
-  def connection_peer_cert(_conn), do: error()
-
-  @spec connection_peer_error(connection()) ::
-          {:ok, Quichex.Native.ConnectionError.t() | nil} | {:error, reason()}
-  def connection_peer_error(_conn), do: error()
-
-  @spec connection_local_error(connection()) ::
-          {:ok, Quichex.Native.ConnectionError.t() | nil} | {:error, reason()}
-  def connection_local_error(_conn), do: error()
-
-  @spec connection_stats(connection()) ::
-          {:ok, Quichex.Native.ConnectionStats.t()} | {:error, reason()}
-  def connection_stats(_conn), do: error()
-
-  @spec connection_peer_transport_params(connection()) ::
-          {:ok, Quichex.Native.TransportParams.t() | nil} | {:error, reason()}
-  def connection_peer_transport_params(_conn), do: error()
-
-  @spec connection_is_in_early_data(connection()) :: {:ok, boolean()} | {:error, reason()}
-  def connection_is_in_early_data(_conn), do: error()
-
-  @spec connection_set_keylog_path(connection(), String.t()) :: :ok | {:error, reason()}
-  def connection_set_keylog_path(_conn, _path), do: error()
-
-  @spec connection_set_session(connection(), quic_binary()) :: :ok | {:error, reason()}
-  def connection_set_session(_conn, _data), do: error()
-
-  @spec connection_session(connection()) :: {:ok, quic_binary() | nil} | {:error, reason()}
-  def connection_session(_conn), do: error()
-
-  @spec connection_server_name(connection()) :: {:ok, String.t() | nil} | {:error, reason()}
-  def connection_server_name(_conn), do: error()
-
-  ## Stream helpers
-  @spec connection_stream_send(connection(), stream_id(), quic_binary(), boolean()) ::
-          {:ok, non_neg_integer()} | {:error, reason()}
-  def connection_stream_send(_conn, _stream_id, _data, _fin), do: error()
-
-  @spec connection_stream_recv(connection(), stream_id(), non_neg_integer()) ::
-          {:ok, {quic_binary(), boolean()}} | {:error, reason()}
-  def connection_stream_recv(_conn, _stream_id, _max_len), do: error()
-
-  @spec connection_readable_streams(connection()) :: {:ok, [stream_id()]} | {:error, reason()}
-  def connection_readable_streams(_conn), do: error()
-
-  @spec connection_writable_streams(connection()) :: {:ok, [stream_id()]} | {:error, reason()}
-  def connection_writable_streams(_conn), do: error()
-
-  @spec connection_stream_finished(connection(), stream_id()) ::
-          {:ok, boolean()} | {:error, reason()}
-  def connection_stream_finished(_conn, _stream_id), do: error()
-
-  @spec connection_stream_shutdown(connection(), stream_id(), String.t(), non_neg_integer()) ::
-          :ok | {:error, reason()}
-  def connection_stream_shutdown(_conn, _stream_id, _direction, _error_code), do: error()
-
-  ## Datagram helpers
-  @spec connection_dgram_max_writable_len(connection()) ::
-          {:ok, non_neg_integer()} | {:error, reason()}
-  def connection_dgram_max_writable_len(_conn), do: error()
-
-  @spec connection_dgram_recv_queue_len(connection()) ::
-          {:ok, non_neg_integer()} | {:error, reason()}
-  def connection_dgram_recv_queue_len(_conn), do: error()
-
-  @spec connection_dgram_recv_queue_byte_size(connection()) ::
-          {:ok, non_neg_integer()} | {:error, reason()}
-  def connection_dgram_recv_queue_byte_size(_conn), do: error()
-
-  @spec connection_dgram_send_queue_byte_size(connection()) ::
-          {:ok, non_neg_integer()} | {:error, reason()}
-  def connection_dgram_send_queue_byte_size(_conn), do: error()
-
-  @spec connection_dgram_send_queue_len(connection()) ::
-          {:ok, non_neg_integer()} | {:error, reason()}
-  def connection_dgram_send_queue_len(_conn), do: error()
-
-  @spec connection_dgram_send(connection(), quic_binary()) ::
-          {:ok, non_neg_integer()} | {:error, reason()}
-  def connection_dgram_send(_conn, _payload), do: error()
-
-  @spec connection_dgram_recv(connection(), non_neg_integer()) ::
-          {:ok, quic_binary()} | {:error, reason()}
-  def connection_dgram_recv(_conn, _max_len), do: error()
-
-  ## Packet helpers
-  @spec header_info(quic_binary(), non_neg_integer()) ::
-          {:ok, Quichex.Native.PacketHeader.t()} | {:error, reason()}
-  def header_info(_packet, _dcid_len), do: error()
-
-  @spec version_negotiate(quic_binary(), quic_binary()) ::
-          {:ok, quic_binary()} | {:error, reason()}
-  def version_negotiate(_scid, _dcid), do: error()
-
-  @spec retry(quic_binary(), quic_binary(), quic_binary(), quic_binary(), non_neg_integer()) ::
-          {:ok, quic_binary()} | {:error, reason()}
-  def retry(_scid, _dcid, _new_scid, _token, _version), do: error()
-
-  defp error, do: :erlang.nif_error(:nif_not_loaded)
+  alias Quichex.Native.{ConfigError, Nif}
+
+  @type config :: Nif.config()
+  @type connection :: Nif.connection()
+  @type stream_id :: Nif.stream_id()
+  @type reason :: Nif.reason()
+  @type quic_binary :: Nif.quic_binary()
+
+  @spec config_new(non_neg_integer()) :: config()
+  def config_new(version) do
+    config_ok!("config_new", Nif.config_new(version))
+  end
+
+  @spec config_set_application_protos(config(), [quic_binary()]) :: config()
+  def config_set_application_protos(config, protos) do
+    config_ok!("config_set_application_protos", Nif.config_set_application_protos(config, protos), config)
+  end
+
+  @spec config_set_max_idle_timeout(config(), non_neg_integer()) :: config()
+  def config_set_max_idle_timeout(config, millis) do
+    config_ok!("config_set_max_idle_timeout", Nif.config_set_max_idle_timeout(config, millis), config)
+  end
+
+  @spec config_set_initial_max_streams_bidi(config(), non_neg_integer()) :: config()
+  def config_set_initial_max_streams_bidi(config, value) do
+    config_ok!(
+      "config_set_initial_max_streams_bidi",
+      Nif.config_set_initial_max_streams_bidi(config, value),
+      config
+    )
+  end
+
+  @spec config_set_initial_max_streams_uni(config(), non_neg_integer()) :: config()
+  def config_set_initial_max_streams_uni(config, value) do
+    config_ok!(
+      "config_set_initial_max_streams_uni",
+      Nif.config_set_initial_max_streams_uni(config, value),
+      config
+    )
+  end
+
+  @spec config_set_initial_max_data(config(), non_neg_integer()) :: config()
+  def config_set_initial_max_data(config, value) do
+    config_ok!("config_set_initial_max_data", Nif.config_set_initial_max_data(config, value), config)
+  end
+
+  @spec config_set_initial_max_stream_data_bidi_local(config(), non_neg_integer()) :: config()
+  def config_set_initial_max_stream_data_bidi_local(config, value) do
+    config_ok!(
+      "config_set_initial_max_stream_data_bidi_local",
+      Nif.config_set_initial_max_stream_data_bidi_local(config, value),
+      config
+    )
+  end
+
+  @spec config_set_initial_max_stream_data_bidi_remote(config(), non_neg_integer()) :: config()
+  def config_set_initial_max_stream_data_bidi_remote(config, value) do
+    config_ok!(
+      "config_set_initial_max_stream_data_bidi_remote",
+      Nif.config_set_initial_max_stream_data_bidi_remote(config, value),
+      config
+    )
+  end
+
+  @spec config_set_initial_max_stream_data_uni(config(), non_neg_integer()) :: config()
+  def config_set_initial_max_stream_data_uni(config, value) do
+    config_ok!(
+      "config_set_initial_max_stream_data_uni",
+      Nif.config_set_initial_max_stream_data_uni(config, value),
+      config
+    )
+  end
+
+  @spec config_verify_peer(config(), boolean()) :: config()
+  def config_verify_peer(config, verify) do
+    config_ok!("config_verify_peer", Nif.config_verify_peer(config, verify), config)
+  end
+
+  @spec config_load_cert_chain_from_pem_file(config(), String.t()) :: config()
+  def config_load_cert_chain_from_pem_file(config, path) do
+    config_ok!(
+      "config_load_cert_chain_from_pem_file",
+      Nif.config_load_cert_chain_from_pem_file(config, path),
+      config
+    )
+  end
+
+  @spec config_load_priv_key_from_pem_file(config(), String.t()) :: config()
+  def config_load_priv_key_from_pem_file(config, path) do
+    config_ok!(
+      "config_load_priv_key_from_pem_file",
+      Nif.config_load_priv_key_from_pem_file(config, path),
+      config
+    )
+  end
+
+  @spec config_load_verify_locations_from_file(config(), String.t()) :: config()
+  def config_load_verify_locations_from_file(config, path) do
+    config_ok!(
+      "config_load_verify_locations_from_file",
+      Nif.config_load_verify_locations_from_file(config, path),
+      config
+    )
+  end
+
+  @spec config_load_verify_locations_from_directory(config(), String.t()) :: config()
+  def config_load_verify_locations_from_directory(config, path) do
+    config_ok!(
+      "config_load_verify_locations_from_directory",
+      Nif.config_load_verify_locations_from_directory(config, path),
+      config
+    )
+  end
+
+  @spec config_set_cc_algorithm(config(), String.t()) :: config()
+  def config_set_cc_algorithm(config, algo) do
+    config_ok!("config_set_cc_algorithm", Nif.config_set_cc_algorithm(config, algo), config)
+  end
+
+  @spec config_enable_dgram(config(), boolean(), non_neg_integer(), non_neg_integer()) :: config()
+  def config_enable_dgram(config, enabled, recv_queue_len, send_queue_len) do
+    config_ok!(
+      "config_enable_dgram",
+      Nif.config_enable_dgram(config, enabled, recv_queue_len, send_queue_len),
+      config
+    )
+  end
+
+  @spec config_set_max_recv_udp_payload_size(config(), non_neg_integer()) :: config()
+  def config_set_max_recv_udp_payload_size(config, size) do
+    config_ok!(
+      "config_set_max_recv_udp_payload_size",
+      Nif.config_set_max_recv_udp_payload_size(config, size),
+      config
+    )
+  end
+
+  @spec config_set_max_send_udp_payload_size(config(), non_neg_integer()) :: config()
+  def config_set_max_send_udp_payload_size(config, size) do
+    config_ok!(
+      "config_set_max_send_udp_payload_size",
+      Nif.config_set_max_send_udp_payload_size(config, size),
+      config
+    )
+  end
+
+  @spec config_set_disable_active_migration(config(), boolean()) :: config()
+  def config_set_disable_active_migration(config, disable) do
+    config_ok!(
+      "config_set_disable_active_migration",
+      Nif.config_set_disable_active_migration(config, disable),
+      config
+    )
+  end
+
+  @spec config_grease(config(), boolean()) :: config()
+  def config_grease(config, enable) do
+    config_ok!("config_grease", Nif.config_grease(config, enable), config)
+  end
+
+  @spec config_discover_pmtu(config(), boolean()) :: config()
+  def config_discover_pmtu(config, enable) do
+    config_ok!("config_discover_pmtu", Nif.config_discover_pmtu(config, enable), config)
+  end
+
+  @spec config_log_keys(config()) :: config()
+  def config_log_keys(config) do
+    config_ok!("config_log_keys", Nif.config_log_keys(config), config)
+  end
+
+  @spec config_enable_early_data(config()) :: config()
+  def config_enable_early_data(config) do
+    config_ok!("config_enable_early_data", Nif.config_enable_early_data(config), config)
+  end
+
+  @spec config_set_max_amplification_factor(config(), non_neg_integer()) :: config()
+  def config_set_max_amplification_factor(config, value) do
+    config_ok!(
+      "config_set_max_amplification_factor",
+      Nif.config_set_max_amplification_factor(config, value),
+      config
+    )
+  end
+
+  @spec config_set_ack_delay_exponent(config(), non_neg_integer()) :: config()
+  def config_set_ack_delay_exponent(config, value) do
+    config_ok!(
+      "config_set_ack_delay_exponent",
+      Nif.config_set_ack_delay_exponent(config, value),
+      config
+    )
+  end
+
+  @spec config_set_max_ack_delay(config(), non_neg_integer()) :: config()
+  def config_set_max_ack_delay(config, value) do
+    config_ok!("config_set_max_ack_delay", Nif.config_set_max_ack_delay(config, value), config)
+  end
+
+  @spec config_set_initial_congestion_window_packets(config(), non_neg_integer()) :: config()
+  def config_set_initial_congestion_window_packets(config, value) do
+    config_ok!(
+      "config_set_initial_congestion_window_packets",
+      Nif.config_set_initial_congestion_window_packets(config, value),
+      config
+    )
+  end
+
+  @spec config_enable_hystart(config(), boolean()) :: config()
+  def config_enable_hystart(config, enable) do
+    config_ok!("config_enable_hystart", Nif.config_enable_hystart(config, enable), config)
+  end
+
+  @spec config_enable_pacing(config(), boolean()) :: config()
+  def config_enable_pacing(config, enable) do
+    config_ok!("config_enable_pacing", Nif.config_enable_pacing(config, enable), config)
+  end
+
+  @spec config_set_max_pacing_rate(config(), non_neg_integer()) :: config()
+  def config_set_max_pacing_rate(config, value) do
+    config_ok!("config_set_max_pacing_rate", Nif.config_set_max_pacing_rate(config, value), config)
+  end
+
+  @spec config_set_max_connection_window(config(), non_neg_integer()) :: config()
+  def config_set_max_connection_window(config, value) do
+    config_ok!(
+      "config_set_max_connection_window",
+      Nif.config_set_max_connection_window(config, value),
+      config
+    )
+  end
+
+  @spec config_set_max_stream_window(config(), non_neg_integer()) :: config()
+  def config_set_max_stream_window(config, value) do
+    config_ok!("config_set_max_stream_window", Nif.config_set_max_stream_window(config, value), config)
+  end
+
+  @spec config_set_active_connection_id_limit(config(), non_neg_integer()) :: config()
+  def config_set_active_connection_id_limit(config, value) do
+    config_ok!(
+      "config_set_active_connection_id_limit",
+      Nif.config_set_active_connection_id_limit(config, value),
+      config
+    )
+  end
+
+  @spec config_set_stateless_reset_token(config(), quic_binary()) :: config()
+  def config_set_stateless_reset_token(config, token) do
+    config_ok!(
+      "config_set_stateless_reset_token",
+      Nif.config_set_stateless_reset_token(config, token),
+      config
+    )
+  end
+
+  @spec config_set_disable_dcid_reuse(config(), boolean()) :: config()
+  def config_set_disable_dcid_reuse(config, disable) do
+    config_ok!(
+      "config_set_disable_dcid_reuse",
+      Nif.config_set_disable_dcid_reuse(config, disable),
+      config
+    )
+  end
+
+  @spec config_set_ticket_key(config(), quic_binary()) :: config()
+  def config_set_ticket_key(config, key) do
+    config_ok!("config_set_ticket_key", Nif.config_set_ticket_key(config, key), config)
+  end
+
+  defp config_ok!(function, result, config \\ nil) do
+    case result do
+      :ok -> config
+      {:ok, {}} -> config
+      {:ok, value} -> value
+      {:error, reason} ->
+        raise ConfigError,
+          message: "#{function} failed: #{reason}",
+          reason: reason,
+          function: function
+
+      other ->
+        raise ConfigError,
+          message: "#{function} failed: #{inspect(other)}",
+          reason: inspect(other),
+          function: function
+    end
+  end
+
+  # Delegate non-config functions to the NIF module.
+  Code.ensure_compiled!(Nif)
+
+  for {name, arity} <- Nif.__info__(:functions),
+      name not in [:__info__, :module_info],
+      not String.starts_with?(Atom.to_string(name), "config_") do
+    args = Macro.generate_arguments(arity, __MODULE__)
+    defdelegate unquote(name)(unquote_splicing(args)), to: Nif
+  end
 end
