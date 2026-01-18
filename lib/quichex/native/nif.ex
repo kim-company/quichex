@@ -9,6 +9,8 @@ defmodule Quichex.Native.Nif do
 
   @type config :: reference()
   @type connection :: reference()
+  @type h3_config :: reference()
+  @type h3_connection :: reference()
   @type stream_id :: non_neg_integer()
   @type reason :: String.t()
   @type quic_binary :: binary()
@@ -68,6 +70,10 @@ defmodule Quichex.Native.Nif do
   @spec config_enable_dgram(config(), boolean(), non_neg_integer(), non_neg_integer()) ::
           :ok | {:error, reason()}
   def config_enable_dgram(_config, _enabled, _recv_queue_len, _send_queue_len), do: error()
+
+  @spec config_set_max_datagram_frame_size(config(), non_neg_integer()) ::
+          :ok | {:error, reason()}
+  def config_set_max_datagram_frame_size(_config, _size), do: error()
 
   @spec config_set_max_recv_udp_payload_size(config(), non_neg_integer()) ::
           :ok | {:error, reason()}
@@ -317,6 +323,70 @@ defmodule Quichex.Native.Nif do
   @spec retry(quic_binary(), quic_binary(), quic_binary(), quic_binary(), non_neg_integer()) ::
           {:ok, quic_binary()} | {:error, reason()}
   def retry(_scid, _dcid, _new_scid, _token, _version), do: error()
+
+  ## HTTP/3 helpers
+  @spec h3_config_new() :: {:ok, h3_config()} | {:error, reason()}
+  def h3_config_new(), do: error()
+
+  @spec h3_config_set_max_field_section_size(h3_config(), non_neg_integer()) ::
+          :ok | {:error, reason()}
+  def h3_config_set_max_field_section_size(_config, _value), do: error()
+
+  @spec h3_config_set_qpack_max_table_capacity(h3_config(), non_neg_integer()) ::
+          :ok | {:error, reason()}
+  def h3_config_set_qpack_max_table_capacity(_config, _value), do: error()
+
+  @spec h3_config_set_qpack_blocked_streams(h3_config(), non_neg_integer()) ::
+          :ok | {:error, reason()}
+  def h3_config_set_qpack_blocked_streams(_config, _value), do: error()
+
+  @spec h3_config_enable_extended_connect(h3_config(), boolean()) ::
+          :ok | {:error, reason()}
+  def h3_config_enable_extended_connect(_config, _enabled), do: error()
+
+  @spec h3_config_set_additional_settings(h3_config(), [{non_neg_integer(), non_neg_integer()}]) ::
+          :ok | {:error, reason()}
+  def h3_config_set_additional_settings(_config, _settings), do: error()
+
+  @spec h3_conn_new_with_transport(connection(), h3_config()) ::
+          {:ok, h3_connection()} | {:error, reason()}
+  def h3_conn_new_with_transport(_conn, _h3_config), do: error()
+
+  @spec h3_conn_poll(connection(), h3_connection()) ::
+          {:ok, {stream_id(), term()}} | {:error, reason()}
+  def h3_conn_poll(_conn, _h3_conn), do: error()
+
+  @spec h3_send_request(connection(), h3_connection(), [{quic_binary(), quic_binary()}], boolean()) ::
+          {:ok, stream_id()} | {:error, reason()}
+  def h3_send_request(_conn, _h3_conn, _headers, _fin), do: error()
+
+  @spec h3_send_response(
+          connection(),
+          h3_connection(),
+          stream_id(),
+          [{quic_binary(), quic_binary()}],
+          boolean()
+        ) :: :ok | {:error, reason()}
+  def h3_send_response(_conn, _h3_conn, _stream_id, _headers, _fin), do: error()
+
+  @spec h3_send_body(connection(), h3_connection(), stream_id(), quic_binary(), boolean()) ::
+          :ok | {:error, reason()}
+  def h3_send_body(_conn, _h3_conn, _stream_id, _body, _fin), do: error()
+
+  @spec h3_recv_body(connection(), h3_connection(), stream_id(), non_neg_integer()) ::
+          {:ok, quic_binary()} | {:error, reason()}
+  def h3_recv_body(_conn, _h3_conn, _stream_id, _max_bytes), do: error()
+
+  @spec h3_send_goaway(connection(), h3_connection(), stream_id()) :: :ok | {:error, reason()}
+  def h3_send_goaway(_conn, _h3_conn, _stream_id), do: error()
+
+  @spec h3_extended_connect_enabled_by_peer(h3_connection()) ::
+          {:ok, boolean()} | {:error, reason()}
+  def h3_extended_connect_enabled_by_peer(_h3_conn), do: error()
+
+  @spec h3_dgram_enabled_by_peer(connection(), h3_connection()) ::
+          {:ok, boolean()} | {:error, reason()}
+  def h3_dgram_enabled_by_peer(_conn, _h3_conn), do: error()
 
   defp error, do: :erlang.nif_error(:nif_not_loaded)
 end

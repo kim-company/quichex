@@ -13,10 +13,22 @@ pub struct ConnectionResource {
     pub known_streams: Arc<Mutex<HashSet<u64>>>,
 }
 
+/// Wrapper for quiche::h3::Config with thread-safe reference counting
+pub struct H3ConfigResource {
+    pub inner: Arc<Mutex<quiche::h3::Config>>,
+}
+
+/// Wrapper for quiche::h3::Connection with thread-safe reference counting
+pub struct H3ConnectionResource {
+    pub inner: Arc<Mutex<quiche::h3::Connection>>,
+}
+
 /// Load resources - called when NIF library is loaded
 #[allow(non_local_definitions)]
 pub fn on_load(env: Env, _load_info: Term) -> bool {
     let _ = rustler::resource!(ConfigResource, env);
     let _ = rustler::resource!(ConnectionResource, env);
+    let _ = rustler::resource!(H3ConfigResource, env);
+    let _ = rustler::resource!(H3ConnectionResource, env);
     true
 }

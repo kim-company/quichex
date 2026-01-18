@@ -136,6 +136,15 @@ defmodule Quichex.Native do
     )
   end
 
+  @spec config_set_max_datagram_frame_size(config(), non_neg_integer()) :: config()
+  def config_set_max_datagram_frame_size(config, size) do
+    config_ok!(
+      "config_set_max_datagram_frame_size",
+      Nif.config_set_max_datagram_frame_size(config, size),
+      config
+    )
+  end
+
   @spec config_set_max_recv_udp_payload_size(config(), non_neg_integer()) :: config()
   def config_set_max_recv_udp_payload_size(config, size) do
     config_ok!(

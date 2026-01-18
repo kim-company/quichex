@@ -1,5 +1,6 @@
 mod config;
 mod connection;
+mod h3;
 mod packet;
 mod resources;
 mod types;
@@ -9,6 +10,8 @@ mod types;
 pub use config::*;
 #[allow(unused_imports)]
 pub use connection::*;
+#[allow(unused_imports)]
+pub use h3::*;
 #[allow(unused_imports)]
 pub use packet::*;
 

@@ -256,6 +256,18 @@ pub fn config_enable_dgram(
     Ok(())
 }
 
+/// Sets the QUIC max_datagram_frame_size transport parameter.
+///
+/// TODO: quiche does not expose a direct setter; enable_dgram() sets it to 65536
+/// as recommended by draft-ietf-quic-datagram-01.
+#[rustler::nif]
+pub fn config_set_max_datagram_frame_size(
+    _config: ResourceArc<ConfigResource>,
+    _size: u64,
+) -> Result<(), String> {
+    Err("quiche does not expose set_max_datagram_frame_size; use config_enable_dgram".to_string())
+}
+
 /// Sets the maximum UDP payload size for receiving
 #[rustler::nif]
 pub fn config_set_max_recv_udp_payload_size(
